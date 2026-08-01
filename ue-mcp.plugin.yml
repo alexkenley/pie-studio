@@ -245,7 +245,7 @@ nativeModule:
       schema:
         target: { type: string, description: "Actor id (required)" }
         path:   { type: string, description: "Dotted property path, e.g. Health or Movement.MaxWalkSpeed (required)" }
-        value:  { description: "Value to write (number, bool, string, or enum name); coerced via ImportText (required)" }
+        value:  { type: string, description: "Text value to write; ImportText coerces numbers, bools, strings, and enum names (required)" }
     actor_call:
       description: "Invoke a callable UFUNCTION on a live PIE actor, importing args positionally into its parameters."
       schema:

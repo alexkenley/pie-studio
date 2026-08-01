@@ -64,6 +64,15 @@ namespace
 		}
 		R->SetArrayField(TEXT("markers"), Marks);
 	}
+
+	bool IsRecordingIdSafe(const FString& Id)
+	{
+		return Id != TEXT(".")
+			&& Id != TEXT("..")
+			&& !Id.Contains(TEXT("/"))
+			&& !Id.Contains(TEXT("\\"))
+			&& !Id.Contains(TEXT(":"));
+	}
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::PieRecordArm(const TSharedPtr<FJsonObject>& Params)
@@ -285,6 +294,10 @@ TSharedPtr<FJsonValue> FGameplayHandlers::PieRecordDelete(const TSharedPtr<FJson
 	MCP_CHECK_GAME_THREAD();
 	FString Id;
 	if (auto E = RequireString(Params, TEXT("id"), Id)) return E;
+	if (!IsRecordingIdSafe(Id))
+	{
+		return MCPError(TEXT("Recording id must be a single directory name"));
+	}
 	const bool bConfirm = OptionalBool(Params, TEXT("confirm"), false);
 	const FString Root = OptionalString(Params, TEXT("recording_dir"), DefaultRecordingsRoot());
 	const FString Dir = Root / Id;

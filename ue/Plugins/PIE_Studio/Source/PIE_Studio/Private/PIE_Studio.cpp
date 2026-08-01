@@ -136,7 +136,7 @@ void FPIE_StudioModule::StartupModule()
 		})
 	);
 
-	UE_LOG(LogPIEStudio, Log, TEXT("[pie-studio] Registered %d handlers"), 45);
+	UE_LOG(LogPIEStudio, Log, TEXT("[pie-studio] Registered %d handlers"), 52);
 }
 
 void FPIE_StudioModule::ShutdownModule()
