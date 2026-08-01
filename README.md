@@ -85,8 +85,11 @@ pie(action="record_read", id="some-recording", file="drift")
 - **Analysis** — `replay_analyze` (first-divergence lead + errors + images), `replay_state` (deterministic scrub/snapshot)
 - **Profiling** — `perf_summary` (frametime p50/p99, GPU, hitches), `trace_start`, `trace_stop` (Unreal Insights `.utrace`)
 - **Reproduction tests** — `test_scaffold`, `test_run`, `test_list`
+- **Assertions** — `assert_eval` over recorded or observed series
 - **Observation** — `observe_arm`, `observe_disarm`, `observe_stop`, `observe_status`, `observe_list`, `observe_read` with profile-based sampling
 - **Input injection** — `inject_input`, `inject_input_start`, `inject_input_update`, `inject_input_stop`, `inject_input_tape`
+- **Actor puppeteering** — `actor_spawn`, `actor_destroy`, `actor_set`, `actor_call`
+- **Scenarios** — `scenario_scaffold`, `scenario_validate`
 - **Profiles** — `profile_create`, `profile_read`, `profile_update`, `profile_delete`, `profile_list`
 - **Diff / Snapshot** — `record_diff`, `snapshot`
 - **PIE inspection** — `anim_state`, `anim_properties`, `subsystem_state`
