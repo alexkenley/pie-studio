@@ -48,6 +48,9 @@ public:
 	static TSharedPtr<FJsonValue> InjectInputUpdate(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> InjectInputStop(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> InjectInputTape(const TSharedPtr<FJsonObject>& Params);
+	// Shared selector parsing for handlers that target a PIE instance.
+	static bool ParsePIEInstance(const TSharedPtr<FJsonObject>& Params,
+		int32& OutPIEInstance, FString& OutError);
 
 	// Recording
 	static TSharedPtr<FJsonValue> PieRecordArm(const TSharedPtr<FJsonObject>& Params);

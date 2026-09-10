@@ -51,6 +51,24 @@ Observation profiles are UDataAssets that control what gets sampled during repla
 | **Capture Montage** | Sample active anim montage name and position. |
 | **Drift Thresholds** | Minimum change to count as divergence. Filters physics/animation jitter. Position (cm), Rotation (deg), Velocity (cm/s), and a default for tracked values. |
 
+## Multiplayer PIE targeting
+
+Input, recording, replay, and observation actions accept optional `pie_instance`.
+It selects exact `FWorldContext::PIEInstance`; `client_id` remains local-player
+index inside selected world. Explicit selectors fail when instance is missing,
+dedicated-server-only, or missing requested local player.
+Supplied `pie_instance` values must be finite exact non-negative integers within the int32 range; invalid values are rejected rather than treated as automatic selection.
+
+When `pie_instance` is omitted, PIE Studio first prefers eligible
+`GEditor->PlayWorld`, then first eligible PIE/Game world containing requested
+local player. This avoids dedicated-server-first mismatch in multiplayer PIE.
+Selected world and player stay fixed for each recording, replay, observation
+session, hold, and tape.
+Unresolved recorder, replay, and observation targets are retried for up to 10
+seconds from `BeginPIE`; they then finalize as failures and retain `last_error`
+in their status responses, including after natural `EndPIE`.
+
+
 ## Frame Capture
 
 When `capture_frame_every` is set, replay grabs viewport frames as **JPEGs** (kept on disk under `<recording>/frames/`) and composes a single labeled **contact sheet** at `<recording>/captures/contact_<timestamp>.jpg` — a grid montage of keyframes with the frame index drawn on each cell. A vision model reads stills, so the frames and the contact sheet are the useful artifacts; the paths come back in `replay_status.last_result` (`frame_dir`, `frame_count`, `contact_sheet_path`).
