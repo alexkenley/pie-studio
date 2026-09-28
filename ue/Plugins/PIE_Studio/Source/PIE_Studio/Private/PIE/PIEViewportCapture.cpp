@@ -106,7 +106,7 @@ void FPIEViewportCapture::ProcessReadbacks_RenderThread(FRHICommandListImmediate
 	// flight, picking them up on a later frame.
 	if (bDrainAll && InFlight.Num() > 0)
 	{
-		RHICmdList.BlockUntilGPUIdle();
+		RHICmdList.SubmitAndBlockUntilGPUIdle();
 	}
 
 	for (int32 i = 0; i < InFlight.Num(); )
