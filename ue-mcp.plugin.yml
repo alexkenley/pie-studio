@@ -1,5 +1,5 @@
 actionPrefix: "pie"
-minServerVersion: "1.0.69"   # provisioning a new category via nativeModule.category landed in 1.0.69
+minServerVersion: "1.3.0"    # MCPResolveActorToken / MCPResolveClass landed in the 1.3.0 bridge
 
 # All actions are implemented by the PIE_Studio C++ module, which registers
 # them on the bridge via UEMCP::RegisterExternalHandler. `nativeModule.category`
