@@ -23,6 +23,25 @@ everywhere. So:
 - `fixed_timestep=true` on replay makes runs *more* reproducible (fixed 1/pin_fps
   delta), never fully deterministic.
 
+
+## Multiplayer PIE targeting
+
+Actions that inject, record, replay, or observe accept optional `pie_instance`.
+It identifies exact `FWorldContext::PIEInstance`. `client_id` is local-player
+index within selected world, not remote-controller or PIE-process index.
+Explicit `pie_instance` fails if instance missing, dedicated-server-only, or
+without requested local player; it never falls back.
+Supplied `pie_instance` values must be finite exact non-negative integers within the int32 range; invalid values are rejected rather than treated as automatic selection.
+
+Omitted `pie_instance` (`INDEX_NONE`) prefers eligible `GEditor->PlayWorld`,
+then first eligible PIE/Game world containing requested local player. This
+explicitly skips dedicated-server-first mismatch. Recorder, replayer, observer,
+sampler, direct injection, holds, and tapes retain same selected world/player
+for session or injection lifetime.
+Unresolved recorder, replay, and observation targets are retried for up to 10
+seconds from `BeginPIE`; they then finalize as failures and retain `last_error`
+in their status responses, including after natural `EndPIE`.
+
 ## Debugging loop (what to call, in order)
 
 1. `replay_run(recording_dir=...)` - drive the recording unattended; poll

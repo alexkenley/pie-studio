@@ -7,9 +7,9 @@
 #include "EnhancedInputSubsystems.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
-#include "Kismet/GameplayStatics.h"
 #include "Misc/Guid.h"
 #include "Misc/CoreDelegates.h"
+#include "PIEWorldResolver.h"
 
 namespace UEMCPPIE
 {
@@ -18,20 +18,20 @@ namespace UEMCPPIE
 		struct FHoldEntry
 		{
 			TWeakObjectPtr<UInputAction> Action;
+			TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> Subsystem;
 			FInputActionValue Value;
 			FString ActionPath;
 			FString ActionName;
-			int32 ClientIndex = 0;
 		};
 
 		struct FTapeEntry
 		{
 			TWeakObjectPtr<UInputAction> Action;
+			TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> Subsystem;
 			TArray<FVector> Values;
 			int32 Index = 0;
 			FString ActionPath;
 			FString ActionName;
-			int32 ClientIndex = 0;
 		};
 
 		static TMap<FString, FHoldEntry> GHolds;
@@ -40,35 +40,116 @@ namespace UEMCPPIE
 		static bool GTickerBound = false;
 		static int32 GIdCounter = 0;
 
-		UWorld* GetPIEWorldLocal()
+		void StopContinuousInjection(
+			UEnhancedInputLocalPlayerSubsystem* Subsystem, UInputAction* Action)
 		{
-			if (!GEngine) return nullptr;
-			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			if (Subsystem && Action)
 			{
-				if ((Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game) && Ctx.World())
+				Subsystem->StopContinuousInputInjectionForAction(Action);
+			}
+		}
+
+		void StopHoldEntry(const FHoldEntry& Entry)
+		{
+			StopContinuousInjection(Entry.Subsystem.Get(), Entry.Action.Get());
+		}
+
+		void StopTapeEntry(const FTapeEntry& Entry)
+		{
+			StopContinuousInjection(Entry.Subsystem.Get(), Entry.Action.Get());
+		}
+
+		void UnbindTicker()
+		{
+			if (GOnEndFrameHandle.IsValid())
+			{
+				FCoreDelegates::OnEndFrame.Remove(GOnEndFrameHandle);
+				GOnEndFrameHandle.Reset();
+			}
+			GTickerBound = false;
+		}
+
+		void StopAll()
+		{
+			for (const TPair<FString, FHoldEntry>& Pair : GHolds)
+			{
+				StopHoldEntry(Pair.Value);
+			}
+			for (const TPair<FString, FTapeEntry>& Pair : GTapes)
+			{
+				StopTapeEntry(Pair.Value);
+			}
+			GHolds.Reset();
+			GTapes.Reset();
+			UnbindTicker();
+		}
+
+		bool ResolveEnhancedInputSubsystem(int32 RequestedPIEInstance, int32 ClientIndex,
+			ULocalPlayer* ExactLocalPlayer,
+			UEnhancedInputLocalPlayerSubsystem*& OutSubsystem, FString& OutError)
+		{
+			OutSubsystem = nullptr;
+
+			if (ExactLocalPlayer)
+			{
+				UWorld* ExactWorld = ExactLocalPlayer->GetWorld();
+				APlayerController* PlayerController = ExactLocalPlayer->PlayerController;
+				if (!ExactWorld
+					|| (ExactWorld->WorldType != EWorldType::PIE && ExactWorld->WorldType != EWorldType::Game)
+					|| !PlayerController
+					|| PlayerController->GetWorld() != ExactWorld)
 				{
-					return Ctx.World();
+					OutError = FString::Printf(TEXT("Exact local-player target is no longer valid for PIE instance %d local player %d"),
+						RequestedPIEInstance, ClientIndex);
+					return false;
+				}
+
+				OutSubsystem = ExactLocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
+				if (!OutSubsystem)
+				{
+					OutError = FString::Printf(TEXT("EnhancedInputLocalPlayerSubsystem not available for exact PIE instance %d local player %d"),
+						RequestedPIEInstance, ClientIndex);
+					return false;
+				}
+				return true;
+			}
+
+			PIEWorldResolver::FPlayerTarget Target;
+			if (!PIEWorldResolver::ResolvePlayer(RequestedPIEInstance, ClientIndex, Target, OutError))
+			{
+				return false;
+			}
+
+			OutSubsystem = Target.LocalPlayer
+				? Target.LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>()
+				: nullptr;
+			if (!OutSubsystem)
+			{
+				OutError = FString::Printf(TEXT("EnhancedInputLocalPlayerSubsystem not available for PIE instance %d local player %d"),
+					Target.PIEInstance, ClientIndex);
+				return false;
+			}
+
+			return true;
+		}
+
+		bool HasActiveTarget(UEnhancedInputLocalPlayerSubsystem* Subsystem, UInputAction* Action)
+		{
+			for (const TPair<FString, FHoldEntry>& Pair : GHolds)
+			{
+				if (Pair.Value.Subsystem.Get() == Subsystem && Pair.Value.Action.Get() == Action)
+				{
+					return true;
 				}
 			}
-			return nullptr;
-		}
-
-		UEnhancedInputLocalPlayerSubsystem* GetEnhancedInputSubsystemForClient(int32 ClientIndex)
-		{
-			UWorld* W = GetPIEWorldLocal();
-			if (!W) return nullptr;
-			APlayerController* PC = (ClientIndex > 0)
-				? UGameplayStatics::GetPlayerController(W, ClientIndex)
-				: W->GetFirstPlayerController();
-			if (!PC) return nullptr;
-			ULocalPlayer* LP = PC->GetLocalPlayer();
-			if (!LP) return nullptr;
-			return LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
-		}
-
-		UEnhancedInputLocalPlayerSubsystem* GetEnhancedInputSubsystem()
-		{
-			return GetEnhancedInputSubsystemForClient(0);
+			for (const TPair<FString, FTapeEntry>& Pair : GTapes)
+			{
+				if (Pair.Value.Subsystem.Get() == Subsystem && Pair.Value.Action.Get() == Action)
+				{
+					return true;
+				}
+			}
+			return false;
 		}
 
 		FString GenerateId(const TCHAR* Prefix)
@@ -92,142 +173,213 @@ namespace UEMCPPIE
 
 		void TickEndOfFrame()
 		{
-			// Per-client subsystem cache for this tick (avoids re-resolving
-			// for every entry; matters when many injections share a client).
-			TMap<int32, UEnhancedInputLocalPlayerSubsystem*> ClientSubs;
-			auto SubForClient = [&ClientSubs](int32 ClientIndex) -> UEnhancedInputLocalPlayerSubsystem*
-			{
-				if (UEnhancedInputLocalPlayerSubsystem** Cached = ClientSubs.Find(ClientIndex))
-				{
-					return *Cached;
-				}
-				UEnhancedInputLocalPlayerSubsystem* Sub = GetEnhancedInputSubsystemForClient(ClientIndex);
-				ClientSubs.Add(ClientIndex, Sub);
-				return Sub;
-			};
-
 			for (auto It = GHolds.CreateIterator(); It; ++It)
 			{
-				if (!It->Value.Action.IsValid())
+				FHoldEntry& Hold = It->Value;
+				if (!Hold.Action.IsValid() || !Hold.Subsystem.IsValid())
 				{
+					StopHoldEntry(Hold);
 					It.RemoveCurrent();
-					continue;
-				}
-				if (UEnhancedInputLocalPlayerSubsystem* Sub = SubForClient(It->Value.ClientIndex))
-				{
-					Sub->InjectInputForAction(It->Value.Action.Get(), It->Value.Value, {}, {});
 				}
 			}
 
 			for (auto It = GTapes.CreateIterator(); It; ++It)
 			{
-				FTapeEntry& T = It->Value;
-				if (!T.Action.IsValid() || T.Index >= T.Values.Num())
+				FTapeEntry& Tape = It->Value;
+				if (!Tape.Action.IsValid() || !Tape.Subsystem.IsValid())
 				{
+					StopTapeEntry(Tape);
 					It.RemoveCurrent();
 					continue;
 				}
-				if (UEnhancedInputLocalPlayerSubsystem* Sub = SubForClient(T.ClientIndex))
+
+				if (Tape.Index >= Tape.Values.Num())
 				{
-					const FInputActionValue Val = AxisFromVector(T.Action->ValueType, T.Values[T.Index]);
-					Sub->InjectInputForAction(T.Action.Get(), Val, {}, {});
+					StopTapeEntry(Tape);
+					It.RemoveCurrent();
+					continue;
 				}
-				T.Index++;
+
+				const FInputActionValue Value = AxisFromVector(
+					Tape.Action->ValueType, Tape.Values[Tape.Index]);
+				Tape.Subsystem->UpdateValueOfContinuousInputInjectionForAction(
+					Tape.Action.Get(), Value);
+				Tape.Index++;
 			}
 
-			// Self-unbind when nothing remains.
 			if (GHolds.Num() == 0 && GTapes.Num() == 0)
 			{
-				if (GOnEndFrameHandle.IsValid())
-				{
-					FCoreDelegates::OnEndFrame.Remove(GOnEndFrameHandle);
-					GOnEndFrameHandle.Reset();
-					GTickerBound = false;
-				}
+				UnbindTicker();
 			}
 		}
 
 		void EnsureTickerBound()
 		{
-			if (GTickerBound) return;
+			if (GTickerBound)
+			{
+				return;
+			}
 			GOnEndFrameHandle = FCoreDelegates::OnEndFrame.AddStatic(&TickEndOfFrame);
 			GTickerBound = true;
 		}
 	}
 
-	bool FPIEInputInjector::InjectOnce(UInputAction* Action, const FInputActionValue& Value, FString& OutError, int32 ClientIndex)
+	bool FPIEInputInjector::InjectOnce(UInputAction* Action, const FInputActionValue& Value,
+		FString& OutError, int32 ClientIndex, int32 PIEInstance, ULocalPlayer* ExactLocalPlayer)
 	{
-		if (!Action) { OutError = TEXT("InjectOnce: null action"); return false; }
-		UEnhancedInputLocalPlayerSubsystem* Sub = GetEnhancedInputSubsystemForClient(ClientIndex);
-		if (!Sub)
+		if (!Action)
 		{
-			OutError = FString::Printf(TEXT("EnhancedInputLocalPlayerSubsystem not available for client %d (PIE not running or that local player not spawned)"), ClientIndex);
+			OutError = TEXT("InjectOnce: null action");
 			return false;
 		}
-		Sub->InjectInputForAction(Action, Value, {}, {});
+
+		UEnhancedInputLocalPlayerSubsystem* Subsystem = nullptr;
+		if (!ResolveEnhancedInputSubsystem(PIEInstance, ClientIndex, ExactLocalPlayer, Subsystem, OutError))
+		{
+			return false;
+		}
+
+		Subsystem->InjectInputForAction(Action, Value, {}, {});
 		return true;
 	}
 
-	FString FPIEInputInjector::StartHold(UInputAction* Action, const FInputActionValue& Value, const FString& DesiredId, FString& OutError, int32 ClientIndex)
+	FString FPIEInputInjector::StartHold(UInputAction* Action, const FInputActionValue& Value,
+		const FString& DesiredId, FString& OutError, int32 ClientIndex, int32 PIEInstance,
+		ULocalPlayer* ExactLocalPlayer)
 	{
-		if (!Action) { OutError = TEXT("StartHold: null action"); return FString(); }
-		FString Id = DesiredId.IsEmpty() ? GenerateId(TEXT("hold")) : DesiredId;
+		if (!Action)
+		{
+			OutError = TEXT("StartHold: null action");
+			return FString();
+		}
+
+		const FString Id = DesiredId.IsEmpty() ? GenerateId(TEXT("hold")) : DesiredId;
 		if (GHolds.Contains(Id) || GTapes.Contains(Id))
 		{
 			OutError = FString::Printf(TEXT("Injection id '%s' is already in use"), *Id);
 			return FString();
 		}
-		FHoldEntry E;
-		E.Action = Action;
-		E.Value = Value;
-		E.ActionPath = Action->GetPathName();
-		E.ActionName = Action->GetName();
-		E.ClientIndex = ClientIndex;
-		GHolds.Add(Id, E);
+
+		UEnhancedInputLocalPlayerSubsystem* Subsystem = nullptr;
+		if (!ResolveEnhancedInputSubsystem(PIEInstance, ClientIndex, ExactLocalPlayer, Subsystem, OutError))
+		{
+			return FString();
+		}
+		if (HasActiveTarget(Subsystem, Action))
+		{
+			OutError = FString::Printf(TEXT("Action '%s' already has an active hold or tape for the selected player"),
+				*Action->GetPathName());
+			return FString();
+		}
+
+		FHoldEntry Entry;
+		Entry.Action = Action;
+		Entry.Subsystem = Subsystem;
+		Entry.Value = Value;
+		Entry.ActionPath = Action->GetPathName();
+		Entry.ActionName = Action->GetName();
+		Subsystem->StartContinuousInputInjectionForAction(Action, Value, {}, {});
+		GHolds.Add(Id, Entry);
 		EnsureTickerBound();
 		return Id;
 	}
 
 	bool FPIEInputInjector::UpdateHold(const FString& Id, const FInputActionValue& Value)
 	{
-		FHoldEntry* E = GHolds.Find(Id);
-		if (!E) return false;
-		E->Value = Value;
+		FHoldEntry* Entry = GHolds.Find(Id);
+		if (!Entry)
+		{
+			return false;
+		}
+		if (!Entry->Action.IsValid() || !Entry->Subsystem.IsValid())
+		{
+			StopHold(Id);
+			return false;
+		}
+		Entry->Value = Value;
+		Entry->Subsystem->UpdateValueOfContinuousInputInjectionForAction(
+			Entry->Action.Get(), Value);
 		return true;
 	}
 
 	bool FPIEInputInjector::StopHold(const FString& Id)
 	{
-		return GHolds.Remove(Id) > 0;
+		FHoldEntry* Entry = GHolds.Find(Id);
+		if (!Entry)
+		{
+			return false;
+		}
+		StopHoldEntry(*Entry);
+		GHolds.Remove(Id);
+		if (GHolds.Num() == 0 && GTapes.Num() == 0)
+		{
+			UnbindTicker();
+		}
+		return true;
 	}
 
-	FString FPIEInputInjector::StartTape(UInputAction* Action, const TArray<FVector>& Values, int32 /*Hz*/, const FString& DesiredId, FString& OutError, int32 ClientIndex)
+	FString FPIEInputInjector::StartTape(UInputAction* Action, const TArray<FVector>& Values,
+		int32 /*Hz*/, const FString& DesiredId, FString& OutError, int32 ClientIndex,
+		int32 PIEInstance, ULocalPlayer* ExactLocalPlayer)
 	{
-		if (!Action) { OutError = TEXT("StartTape: null action"); return FString(); }
-		if (Values.Num() == 0) { OutError = TEXT("StartTape: empty values array"); return FString(); }
-		FString Id = DesiredId.IsEmpty() ? GenerateId(TEXT("tape")) : DesiredId;
+		if (!Action)
+		{
+			OutError = TEXT("StartTape: null action");
+			return FString();
+		}
+		if (Values.Num() == 0)
+		{
+			OutError = TEXT("StartTape: empty values array");
+			return FString();
+		}
+
+		const FString Id = DesiredId.IsEmpty() ? GenerateId(TEXT("tape")) : DesiredId;
 		if (GHolds.Contains(Id) || GTapes.Contains(Id))
 		{
 			OutError = FString::Printf(TEXT("Injection id '%s' is already in use"), *Id);
 			return FString();
 		}
-		FTapeEntry E;
-		E.Action = Action;
-		E.Values = Values;
-		E.Index = 0;
-		E.ActionPath = Action->GetPathName();
-		E.ActionName = Action->GetName();
-		E.ClientIndex = ClientIndex;
-		GTapes.Add(Id, E);
+
+		UEnhancedInputLocalPlayerSubsystem* Subsystem = nullptr;
+		if (!ResolveEnhancedInputSubsystem(PIEInstance, ClientIndex, ExactLocalPlayer, Subsystem, OutError))
+		{
+			return FString();
+		}
+		if (HasActiveTarget(Subsystem, Action))
+		{
+			OutError = FString::Printf(TEXT("Action '%s' already has an active hold or tape for the selected player"),
+				*Action->GetPathName());
+			return FString();
+		}
+
+		FTapeEntry Entry;
+		Entry.Action = Action;
+		Entry.Subsystem = Subsystem;
+		Entry.Values = Values;
+		Entry.Index = 1;
+		Entry.ActionPath = Action->GetPathName();
+		Entry.ActionName = Action->GetName();
+		const FInputActionValue FirstValue = AxisFromVector(Action->ValueType, Values[0]);
+		Subsystem->StartContinuousInputInjectionForAction(Action, FirstValue, {}, {});
+		GTapes.Add(Id, Entry);
 		EnsureTickerBound();
-		// Hz is consumed by the surrounding replay/recorder pipeline which
-		// pins t.MaxFPS; the injector itself runs once per end-of-frame.
 		return Id;
 	}
 
 	bool FPIEInputInjector::StopTape(const FString& Id)
 	{
-		return GTapes.Remove(Id) > 0;
+		FTapeEntry* Entry = GTapes.Find(Id);
+		if (!Entry)
+		{
+			return false;
+		}
+		StopTapeEntry(*Entry);
+		GTapes.Remove(Id);
+		if (GHolds.Num() == 0 && GTapes.Num() == 0)
+		{
+			UnbindTicker();
+		}
+		return true;
 	}
 
 	bool FPIEInputInjector::StopAny(const FString& Id)
@@ -235,6 +387,11 @@ namespace UEMCPPIE
 		const bool A = StopHold(Id);
 		const bool B = StopTape(Id);
 		return A || B;
+	}
+
+	bool FPIEInputInjector::IsActive(const FString& Id)
+	{
+		return GHolds.Contains(Id) || GTapes.Contains(Id);
 	}
 
 	TArray<FInjectionStatus> FPIEInputInjector::List()
@@ -271,19 +428,11 @@ namespace UEMCPPIE
 
 	void FPIEInputInjector::Shutdown()
 	{
-		GHolds.Reset();
-		GTapes.Reset();
-		if (GOnEndFrameHandle.IsValid())
-		{
-			FCoreDelegates::OnEndFrame.Remove(GOnEndFrameHandle);
-			GOnEndFrameHandle.Reset();
-			GTickerBound = false;
-		}
+		StopAll();
 	}
 
 	void FPIEInputInjector::OnPIEEnded()
 	{
-		GHolds.Reset();
-		GTapes.Reset();
+		StopAll();
 	}
 }

@@ -1,8 +1,9 @@
 // Input-injection handlers (inject_input / inject_input_start / _update / _stop /
 // _tape). Members of FGameplayHandlers; registration is in GameplayHandlers.cpp.
 //
-// All handlers delegate to PIE/PIEInputInjector.cpp which routes through
-// UEnhancedInputLocalPlayerSubsystem::InjectInputForAction.
+// All handlers delegate to PIE/PIEInputInjector.cpp, which routes one-shot
+// values through InjectInputForAction and stateful values through the
+// subsystem's continuous injection lifecycle.
 
 #include "GameplayHandlers.h"
 #include "HandlerUtils.h"
@@ -53,9 +54,41 @@ namespace
 	}
 }
 
+bool FGameplayHandlers::ParsePIEInstance(const TSharedPtr<FJsonObject>& Params,
+	int32& OutPIEInstance, FString& OutError)
+{
+	OutPIEInstance = INDEX_NONE;
+	OutError.Reset();
+	if (!Params->HasField(TEXT("pie_instance")))
+	{
+		return true;
+	}
+
+	double Value = 0.0;
+	const bool bValid = Params->TryGetNumberField(TEXT("pie_instance"), Value)
+		&& FMath::IsFinite(Value)
+		&& Value >= 0.0
+		&& Value <= static_cast<double>(MAX_int32)
+		&& Value == static_cast<double>(static_cast<int64>(Value));
+	if (!bValid)
+	{
+		OutError = TEXT("pie_instance must be a finite non-negative integer in int32 range when supplied");
+		return false;
+	}
+
+	OutPIEInstance = static_cast<int32>(Value);
+	return true;
+}
+
 TSharedPtr<FJsonValue> FGameplayHandlers::InjectInput(const TSharedPtr<FJsonObject>& Params)
 {
 	MCP_CHECK_GAME_THREAD();
+	int32 PIEInstance = INDEX_NONE;
+	FString PIEInstanceError;
+	if (!FGameplayHandlers::ParsePIEInstance(Params, PIEInstance, PIEInstanceError))
+	{
+		return MCPError(PIEInstanceError);
+	}
 	FString ActionPath;
 	if (auto E = RequireStringAlt(Params, TEXT("action"), TEXT("action_path"), ActionPath)) return E;
 	TSharedPtr<FJsonValue> LoadErr;
@@ -64,8 +97,9 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInput(const TSharedPtr<FJsonObje
 
 	const FInputActionValue Value = BuildValueForAction(Action, Params);
 	const int32 ClientIndex = FMath::Max(0, OptionalInt(Params, TEXT("client_id"), 0));
+
 	FString Err;
-	if (!UEMCPPIE::FPIEInputInjector::InjectOnce(Action, Value, Err, ClientIndex))
+	if (!UEMCPPIE::FPIEInputInjector::InjectOnce(Action, Value, Err, ClientIndex, PIEInstance))
 	{
 		return MCPError(Err);
 	}
@@ -78,6 +112,12 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInput(const TSharedPtr<FJsonObje
 TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputStart(const TSharedPtr<FJsonObject>& Params)
 {
 	MCP_CHECK_GAME_THREAD();
+	int32 PIEInstance = INDEX_NONE;
+	FString PIEInstanceError;
+	if (!FGameplayHandlers::ParsePIEInstance(Params, PIEInstance, PIEInstanceError))
+	{
+		return MCPError(PIEInstanceError);
+	}
 	FString ActionPath;
 	if (auto E = RequireStringAlt(Params, TEXT("action"), TEXT("action_path"), ActionPath)) return E;
 	TSharedPtr<FJsonValue> LoadErr;
@@ -88,8 +128,10 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputStart(const TSharedPtr<FJso
 	const FString DesiredId = OptionalString(Params, TEXT("injection_id"));
 	const int32 ClientIndex = FMath::Max(0, OptionalInt(Params, TEXT("client_id"), 0));
 
+
 	FString Err;
-	const FString Id = UEMCPPIE::FPIEInputInjector::StartHold(Action, Value, DesiredId, Err, ClientIndex);
+	const FString Id = UEMCPPIE::FPIEInputInjector::StartHold(
+		Action, Value, DesiredId, Err, ClientIndex, PIEInstance);
 	if (Id.IsEmpty()) return MCPError(Err);
 
 	auto Result = MCPSuccess();
@@ -151,6 +193,12 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputStop(const TSharedPtr<FJson
 TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputTape(const TSharedPtr<FJsonObject>& Params)
 {
 	MCP_CHECK_GAME_THREAD();
+	int32 PIEInstance = INDEX_NONE;
+	FString PIEInstanceError;
+	if (!FGameplayHandlers::ParsePIEInstance(Params, PIEInstance, PIEInstanceError))
+	{
+		return MCPError(PIEInstanceError);
+	}
 	FString ActionPath;
 	if (auto E = RequireStringAlt(Params, TEXT("action"), TEXT("action_path"), ActionPath)) return E;
 	TSharedPtr<FJsonValue> LoadErr;
@@ -186,8 +234,10 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputTape(const TSharedPtr<FJson
 	const FString DesiredId = OptionalString(Params, TEXT("injection_id"));
 	const int32 ClientIndex = FMath::Max(0, OptionalInt(Params, TEXT("client_id"), 0));
 
+
 	FString Err;
-	const FString Id = UEMCPPIE::FPIEInputInjector::StartTape(Action, Vals, Hz, DesiredId, Err, ClientIndex);
+	const FString Id = UEMCPPIE::FPIEInputInjector::StartTape(
+		Action, Vals, Hz, DesiredId, Err, ClientIndex, PIEInstance);
 	if (Id.IsEmpty()) return MCPError(Err);
 
 	auto Result = MCPSuccess();
