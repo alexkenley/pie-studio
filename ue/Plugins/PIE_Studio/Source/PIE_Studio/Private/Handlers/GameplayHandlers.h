@@ -48,6 +48,11 @@ public:
 	static TSharedPtr<FJsonValue> InjectInputUpdate(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> InjectInputStop(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> InjectInputTape(const TSharedPtr<FJsonObject>& Params);
+
+	// Multiplayer players
+	static TSharedPtr<FJsonValue> PieClients(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieConsole(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieRemoteResult(const TSharedPtr<FJsonObject>& Params);
 	// Shared selector parsing for handlers that target a PIE instance.
 	static bool ParsePIEInstance(const TSharedPtr<FJsonObject>& Params,
 		int32& OutPIEInstance, FString& OutError);

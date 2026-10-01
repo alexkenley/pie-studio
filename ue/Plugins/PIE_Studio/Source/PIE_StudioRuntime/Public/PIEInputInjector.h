@@ -21,7 +21,14 @@ class ULocalPlayer;
  */
 namespace UEMCPPIE
 {
-	struct FInjectionStatus
+	// Resolves a (PIE instance, local-player index) pair to a local player. The editor module installs one backed
+	// by the PIE world resolver; a separate-process client has no PIE world contexts and always passes the exact
+	// local player instead.
+	using FPlayerResolver = TFunction<ULocalPlayer*(int32 PIEInstance, int32 ClientIndex, FString& OutError)>;
+
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnInjectionFinished, const FString& /*Id*/);
+
+	struct PIE_STUDIORUNTIME_API FInjectionStatus
 	{
 		FString Id;
 		FString ActionPath;
@@ -32,9 +39,15 @@ namespace UEMCPPIE
 		int32 TapeTotal = 0;
 	};
 
-	class FPIEInputInjector
+	class PIE_STUDIORUNTIME_API FPIEInputInjector
 	{
 	public:
+		// Installed by the editor module at startup. Without one, only exact-local-player calls resolve.
+		static void SetPlayerResolver(FPlayerResolver Resolver);
+
+		// Raised when a tape plays its last frame, so a remote player can report completion.
+		static FOnInjectionFinished& OnTapeFinished();
+
 		// One-shot: queues a single-frame injection. Returns false + writes
 		// OutError if the EnhancedInput subsystem is not reachable (e.g. PIE
 		// has not yet spawned a local player). The injected value lasts one

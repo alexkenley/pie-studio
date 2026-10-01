@@ -7,7 +7,9 @@
 
 #include "GameplayHandlers.h"
 #include "HandlerUtils.h"
-#include "PIE/PIEInputInjector.h"
+#include "PIEInputInjector.h"
+#include "PIE/PIERemotePlayers.h"
+#include "PIEStudioRemoteControl.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "Math/Vector2D.h"
@@ -39,6 +41,41 @@ namespace
 		case EInputActionValueType::Axis3D:  return FInputActionValue(FVector(X, Y, Z));
 		}
 		return FInputActionValue();
+	}
+
+	FVector RawValue(const TSharedPtr<FJsonObject>& Params)
+	{
+		return FVector(OptionalNumber(Params, TEXT("value_x"), 1.0), OptionalNumber(Params, TEXT("value_y"), 0.0),
+			OptionalNumber(Params, TEXT("value_z"), 0.0));
+	}
+
+	// `client` 1..N relays to that remote player through the game connection; absent or 0 keeps the local path
+	// (the editor's own player, or `pie_instance`/`client_id` in one-process PIE).
+	UPIEStudioRemoteControl* ResolveRemoteClient(const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonValue>& OutError)
+	{
+		const int32 Client = OptionalInt(Params, TEXT("client"), 0);
+		if (Client <= 0)
+		{
+			return nullptr;
+		}
+		FString Err;
+		UPIEStudioRemoteControl* Control = UEMCPPIE::PIERemotePlayers::Find(Client, Err);
+		if (!Control)
+		{
+			OutError = MCPError(Err);
+		}
+		return Control;
+	}
+
+	TSharedPtr<FJsonObject> RelayedResult(const TSharedPtr<FJsonObject>& Params, const FString& Id, const FString& ActionPath)
+	{
+		auto Result = MCPSuccess();
+		Result->SetStringField(TEXT("injection_id"), Id);
+		Result->SetStringField(TEXT("action"), ActionPath);
+		Result->SetNumberField(TEXT("client"), OptionalInt(Params, TEXT("client"), 0));
+		Result->SetBoolField(TEXT("relayed"), true);
+		Result->SetStringField(TEXT("note"), TEXT("Sent to the remote player; remote_result reports whether it ran."));
+		return Result;
 	}
 
 	FString ValueTypeName(EInputActionValueType T)
@@ -95,6 +132,16 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInput(const TSharedPtr<FJsonObje
 	UInputAction* Action = LoadInputAction(ActionPath, LoadErr);
 	if (!Action) return LoadErr;
 
+	TSharedPtr<FJsonValue> RemoteErr;
+	if (UPIEStudioRemoteControl* Remote = ResolveRemoteClient(Params, RemoteErr))
+	{
+		const FString Id = UEMCPPIE::PIERemotePlayers::NewId(TEXT("inject"));
+		Remote->SendInject(Id, FSoftObjectPath(Action), RawValue(Params));
+		UEMCPPIE::PIERemotePlayers::RememberId(Id, Remote);
+		return MCPResult(RelayedResult(Params, Id, ActionPath));
+	}
+	if (RemoteErr) return RemoteErr;
+
 	const FInputActionValue Value = BuildValueForAction(Action, Params);
 	const int32 ClientIndex = FMath::Max(0, OptionalInt(Params, TEXT("client_id"), 0));
 
@@ -128,6 +175,16 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputStart(const TSharedPtr<FJso
 	const FString DesiredId = OptionalString(Params, TEXT("injection_id"));
 	const int32 ClientIndex = FMath::Max(0, OptionalInt(Params, TEXT("client_id"), 0));
 
+	TSharedPtr<FJsonValue> RemoteErr;
+	if (UPIEStudioRemoteControl* Remote = ResolveRemoteClient(Params, RemoteErr))
+	{
+		const FString Id = DesiredId.IsEmpty() ? UEMCPPIE::PIERemotePlayers::NewId(TEXT("hold")) : DesiredId;
+		Remote->SendStartHold(Id, FSoftObjectPath(Action), RawValue(Params));
+		UEMCPPIE::PIERemotePlayers::RememberId(Id, Remote);
+		return MCPResult(RelayedResult(Params, Id, ActionPath));
+	}
+	if (RemoteErr) return RemoteErr;
+
 
 	FString Err;
 	const FString Id = UEMCPPIE::FPIEInputInjector::StartHold(
@@ -152,6 +209,16 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputUpdate(const TSharedPtr<FJs
 	MCP_CHECK_GAME_THREAD();
 	FString Id;
 	if (auto E = RequireString(Params, TEXT("injection_id"), Id)) return E;
+
+	if (UPIEStudioRemoteControl* Remote = UEMCPPIE::PIERemotePlayers::FindById(Id))
+	{
+		Remote->SendUpdateHold(Id, RawValue(Params));
+		auto Relayed = MCPSuccess();
+		Relayed->SetStringField(TEXT("injection_id"), Id);
+		Relayed->SetBoolField(TEXT("relayed"), true);
+		MCPSetUpdated(Relayed);
+		return MCPResult(Relayed);
+	}
 
 	// We need an action reference to interpret value_x/y/z by type. Look up
 	// the active injection in the current snapshot and resolve the action.
@@ -183,6 +250,14 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputStop(const TSharedPtr<FJson
 	MCP_CHECK_GAME_THREAD();
 	FString Id;
 	if (auto E = RequireString(Params, TEXT("injection_id"), Id)) return E;
+	if (UPIEStudioRemoteControl* Remote = UEMCPPIE::PIERemotePlayers::FindById(Id))
+	{
+		Remote->SendStop(Id);
+		auto Relayed = MCPSuccess();
+		Relayed->SetStringField(TEXT("injection_id"), Id);
+		Relayed->SetBoolField(TEXT("relayed"), true);
+		return MCPResult(Relayed);
+	}
 	const bool Stopped = UEMCPPIE::FPIEInputInjector::StopAny(Id);
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("injection_id"), Id);
@@ -233,6 +308,23 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InjectInputTape(const TSharedPtr<FJson
 	const int32 Hz = OptionalInt(Params, TEXT("hz"), 60);
 	const FString DesiredId = OptionalString(Params, TEXT("injection_id"));
 	const int32 ClientIndex = FMath::Max(0, OptionalInt(Params, TEXT("client_id"), 0));
+
+	TSharedPtr<FJsonValue> RemoteErr;
+	if (UPIEStudioRemoteControl* Remote = ResolveRemoteClient(Params, RemoteErr))
+	{
+		if (Vals.Num() > UPIEStudioRemoteControl::MaxTapeFrames)
+		{
+			return MCPError(FString::Printf(TEXT("inject_input_tape: a relayed tape carries at most %d frames; this one has %d"),
+				UPIEStudioRemoteControl::MaxTapeFrames, Vals.Num()));
+		}
+		const FString Id = DesiredId.IsEmpty() ? UEMCPPIE::PIERemotePlayers::NewId(TEXT("tape")) : DesiredId;
+		Remote->SendTape(Id, FSoftObjectPath(Action), Vals);
+		UEMCPPIE::PIERemotePlayers::RememberId(Id, Remote);
+		auto Relayed = RelayedResult(Params, Id, ActionPath);
+		Relayed->SetNumberField(TEXT("frame_count"), Vals.Num());
+		return MCPResult(Relayed);
+	}
+	if (RemoteErr) return RemoteErr;
 
 
 	FString Err;

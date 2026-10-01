@@ -1,0 +1,230 @@
+#include "PIEStudioRemoteControl.h"
+
+#include "PIE_StudioRuntimeModule.h"
+#include "PIEInputInjector.h"
+#include "Engine/LocalPlayer.h"
+#include "GameFramework/PlayerController.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
+
+namespace
+{
+	FInputActionValue ToActionValue(const UInputAction* Action, const FVector& V)
+	{
+		switch (Action->ValueType)
+		{
+		case EInputActionValueType::Boolean: return FInputActionValue(V.X != 0.0);
+		case EInputActionValueType::Axis1D:  return FInputActionValue(static_cast<float>(V.X));
+		case EInputActionValueType::Axis2D:  return FInputActionValue(FVector2D(V.X, V.Y));
+		case EInputActionValueType::Axis3D:  return FInputActionValue(V);
+		}
+		return FInputActionValue();
+	}
+
+	UInputAction* LoadAction(const FSoftObjectPath& Path, FString& OutError)
+	{
+		UInputAction* Action = Cast<UInputAction>(Path.TryLoad());
+		if (!Action)
+		{
+			OutError = FString::Printf(TEXT("InputAction '%s' did not load in this process"), *Path.ToString());
+		}
+		return Action;
+	}
+}
+
+UPIEStudioRemoteControl::UPIEStudioRemoteControl()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+	SetIsReplicatedByDefault(true);
+}
+
+void UPIEStudioRemoteControl::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// The owning client's copy: announce readiness and listen for this player's tapes finishing.
+	if (GetOwnerRole() == ROLE_AutonomousProxy)
+	{
+		TapeFinishedHandle = UEMCPPIE::FPIEInputInjector::OnTapeFinished().AddUObject(this, &UPIEStudioRemoteControl::HandleTapeFinished);
+		ServerReady();
+	}
+}
+
+void UPIEStudioRemoteControl::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (TapeFinishedHandle.IsValid())
+	{
+		UEMCPPIE::FPIEInputInjector::OnTapeFinished().Remove(TapeFinishedHandle);
+		TapeFinishedHandle.Reset();
+	}
+	for (const FString& Id : OwnedTapes)
+	{
+		UEMCPPIE::FPIEInputInjector::StopAny(Id);
+	}
+	OwnedTapes.Reset();
+	Super::EndPlay(EndPlayReason);
+}
+
+// ── Server-side senders ─────────────────────────────────────────────────────
+
+void UPIEStudioRemoteControl::SendInject(const FString& Id, const FSoftObjectPath& Action, const FVector& Value)
+{
+	Results.Remove(Id);
+	ClientInject(Id, Action, Value);
+}
+
+void UPIEStudioRemoteControl::SendStartHold(const FString& Id, const FSoftObjectPath& Action, const FVector& Value)
+{
+	Results.Remove(Id);
+	ClientStartHold(Id, Action, Value);
+}
+
+void UPIEStudioRemoteControl::SendUpdateHold(const FString& Id, const FVector& Value)
+{
+	ClientUpdateHold(Id, Value);
+}
+
+void UPIEStudioRemoteControl::SendStop(const FString& Id)
+{
+	ClientStop(Id);
+}
+
+void UPIEStudioRemoteControl::SendTape(const FString& Id, const FSoftObjectPath& Action, const TArray<FVector>& Values)
+{
+	Results.Remove(Id);
+	TArray<FVector_NetQuantize100> Quantized;
+	Quantized.Reserve(Values.Num());
+	for (const FVector& V : Values)
+	{
+		Quantized.Add(V);
+	}
+	ClientTape(Id, Action, Quantized);
+}
+
+void UPIEStudioRemoteControl::SendConsole(const FString& Id, const FString& Command)
+{
+	Results.Remove(Id);
+	ClientConsole(Id, Command);
+}
+
+// ── Client-side execution ───────────────────────────────────────────────────
+
+ULocalPlayer* UPIEStudioRemoteControl::ResolveOwnLocalPlayer(FString& OutError) const
+{
+	const APlayerController* PC = Cast<APlayerController>(GetOwner());
+	ULocalPlayer* LocalPlayer = PC ? PC->GetLocalPlayer() : nullptr;
+	if (!LocalPlayer)
+	{
+		OutError = TEXT("This process has no local player for the controller");
+	}
+	return LocalPlayer;
+}
+
+void UPIEStudioRemoteControl::Report(const FString& Id, bool bOk, bool bFinished, const FString& Error)
+{
+	if (!bOk)
+	{
+		UE_LOG(LogPIEStudioRuntime, Warning, TEXT("[PIEStudio] request %s failed: %s"), *Id, *Error);
+	}
+	ServerReport(Id, bOk, bFinished, Error);
+}
+
+void UPIEStudioRemoteControl::ClientInject_Implementation(const FString& Id, const FSoftObjectPath& Action, FVector_NetQuantize100 Value)
+{
+	FString Error;
+	UInputAction* Loaded = LoadAction(Action, Error);
+	ULocalPlayer* LocalPlayer = Loaded ? ResolveOwnLocalPlayer(Error) : nullptr;
+	const bool bOk = LocalPlayer && UEMCPPIE::FPIEInputInjector::InjectOnce(Loaded, ToActionValue(Loaded, Value), Error, 0, INDEX_NONE, LocalPlayer);
+	Report(Id, bOk, bOk, Error);
+}
+
+void UPIEStudioRemoteControl::ClientStartHold_Implementation(const FString& Id, const FSoftObjectPath& Action, FVector_NetQuantize100 Value)
+{
+	FString Error;
+	UInputAction* Loaded = LoadAction(Action, Error);
+	ULocalPlayer* LocalPlayer = Loaded ? ResolveOwnLocalPlayer(Error) : nullptr;
+	const bool bOk = LocalPlayer
+		&& !UEMCPPIE::FPIEInputInjector::StartHold(Loaded, ToActionValue(Loaded, Value), Id, Error, 0, INDEX_NONE, LocalPlayer).IsEmpty();
+	Report(Id, bOk, false, Error);
+}
+
+void UPIEStudioRemoteControl::ClientUpdateHold_Implementation(const FString& Id, FVector_NetQuantize100 Value)
+{
+	TArray<UEMCPPIE::FInjectionStatus> Active = UEMCPPIE::FPIEInputInjector::List();
+	const UEMCPPIE::FInjectionStatus* Hold = Active.FindByPredicate([&Id](const UEMCPPIE::FInjectionStatus& S) { return S.Id == Id; });
+	FString Error;
+	UInputAction* Loaded = Hold ? LoadAction(FSoftObjectPath(Hold->ActionPath), Error) : nullptr;
+	const bool bOk = Loaded && UEMCPPIE::FPIEInputInjector::UpdateHold(Id, ToActionValue(Loaded, Value));
+	if (!bOk && Error.IsEmpty())
+	{
+		Error = FString::Printf(TEXT("No hold '%s' is running in this process"), *Id);
+	}
+	Report(Id, bOk, false, Error);
+}
+
+void UPIEStudioRemoteControl::ClientStop_Implementation(const FString& Id)
+{
+	OwnedTapes.Remove(Id);
+	const bool bOk = UEMCPPIE::FPIEInputInjector::StopAny(Id);
+	Report(Id, bOk, true, bOk ? FString() : FString::Printf(TEXT("No hold or tape '%s' is running in this process"), *Id));
+}
+
+void UPIEStudioRemoteControl::ClientTape_Implementation(const FString& Id, const FSoftObjectPath& Action, const TArray<FVector_NetQuantize100>& Values)
+{
+	FString Error;
+	UInputAction* Loaded = LoadAction(Action, Error);
+	ULocalPlayer* LocalPlayer = Loaded ? ResolveOwnLocalPlayer(Error) : nullptr;
+	bool bOk = false;
+	if (LocalPlayer)
+	{
+		TArray<FVector> Frames;
+		Frames.Reserve(Values.Num());
+		for (const FVector_NetQuantize100& V : Values)
+		{
+			Frames.Add(V);
+		}
+		bOk = !UEMCPPIE::FPIEInputInjector::StartTape(Loaded, Frames, 60, Id, Error, 0, INDEX_NONE, LocalPlayer).IsEmpty();
+		if (bOk)
+		{
+			OwnedTapes.Add(Id);
+		}
+	}
+	Report(Id, bOk, false, Error);
+}
+
+void UPIEStudioRemoteControl::ClientConsole_Implementation(const FString& Id, const FString& Command)
+{
+	APlayerController* PC = Cast<APlayerController>(GetOwner());
+	if (!PC)
+	{
+		Report(Id, false, true, TEXT("No PlayerController owns this component"));
+		return;
+	}
+	PC->ConsoleCommand(Command, /*bWriteToLog*/ true);
+	Report(Id, true, true, FString());
+}
+
+void UPIEStudioRemoteControl::HandleTapeFinished(const FString& Id)
+{
+	if (OwnedTapes.Remove(Id) > 0)
+	{
+		Report(Id, true, true, FString());
+	}
+}
+
+// ── Server-side answers ─────────────────────────────────────────────────────
+
+void UPIEStudioRemoteControl::ServerReady_Implementation()
+{
+	bClientReady = true;
+	UE_LOG(LogPIEStudioRuntime, Log, TEXT("[PIEStudio] remote player %s is ready"), *GetNameSafe(GetOwner()));
+}
+
+void UPIEStudioRemoteControl::ServerReport_Implementation(const FString& Id, bool bOk, bool bFinished, const FString& Error)
+{
+	FPIEStudioRemoteResult& Result = Results.FindOrAdd(Id);
+	Result.Id = Id;
+	Result.bOk = bOk;
+	Result.bFinished = bFinished;
+	Result.Error = Error;
+}

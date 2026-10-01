@@ -33,6 +33,7 @@ nativeModule:
         value_z:     { type: number }
         client_id:   { type: number,  description: "Local-player index inside selected PIE world (default 0)" }
         pie_instance: { type: number, description: "Finite exact non-negative int32 FWorldContext::PIEInstance; omitted auto-selects eligible active PlayWorld, then first eligible PIE/Game world" }
+        client:       { type: number, description: "Multiplayer PIE: 1..N relays to that remote player (join order) through the game connection, including separate-process clients; 0 or absent = local path" }
     inject_input_start:
       description: "Begin holding an Enhanced Input action"
       schema:
@@ -43,6 +44,7 @@ nativeModule:
         injection_id: { type: string, description: "Caller-chosen hold id (optional; minted if absent)" }
         client_id:    { type: number, description: "Local-player index inside selected PIE world (default 0)" }
         pie_instance: { type: number, description: "Finite exact non-negative int32 FWorldContext::PIEInstance; no fallback when explicit" }
+        client:       { type: number, description: "Multiplayer PIE: 1..N relays to that remote player (join order) through the game connection, including separate-process clients; 0 or absent = local path" }
     inject_input_update:
       description: "Change value of a running hold"
       schema:
@@ -63,6 +65,21 @@ nativeModule:
         injection_id: { type: string }
         client_id:    { type: number, description: "Local-player index inside selected PIE world (default 0)" }
         pie_instance: { type: number, description: "Finite exact non-negative int32 FWorldContext::PIEInstance; no fallback when explicit" }
+        client:       { type: number, description: "Multiplayer PIE: 1..N relays to that remote player (join order) through the game connection, including separate-process clients; 0 or absent = local path" }
+
+    # ── Multiplayer players ───────────────────────────────────────
+    clients:
+      description: "List the players of a networked PIE session: client 0 is the editor's own player (listen server), clients 1..N are remote players in join order, including separate-process clients. ready=true once a client can run relayed requests"
+      schema: {}
+    console:
+      description: "Run a console command in a player's process: client 0 (default) the editor's play world, 1..N that remote player's own process"
+      schema:
+        command: { type: string, description: "Console command (required)" }
+        client:  { type: number, description: "0 = editor's player, 1..N = remote player (default 0)" }
+    remote_result:
+      description: "Whether a request relayed to a remote player ran: reported, ok, finished (tapes report finished on their last frame), error"
+      schema:
+        request_id: { type: string, description: "injection_id or request_id returned by the relayed call (required)" }
 
     # ── Recording ─────────────────────────────────────────────────
     record_arm:

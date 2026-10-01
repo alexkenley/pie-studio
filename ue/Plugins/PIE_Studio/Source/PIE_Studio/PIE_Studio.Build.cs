@@ -34,6 +34,7 @@ public class PIE_Studio : ModuleRules
 				"SlateCore",
 				"ToolMenus",
 				"UE_MCP_Bridge",
+				"PIE_StudioRuntime",
 				"UnrealEd",
 				"WorkspaceMenuStructure",
 			}

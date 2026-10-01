@@ -1,5 +1,5 @@
 #include "PIEInputInjector.h"
-#include "PIE_StudioModule.h"
+#include "PIE_StudioRuntimeModule.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
@@ -9,7 +9,6 @@
 #include "InputAction.h"
 #include "Misc/Guid.h"
 #include "Misc/CoreDelegates.h"
-#include "PIEWorldResolver.h"
 
 namespace UEMCPPIE
 {
@@ -39,6 +38,8 @@ namespace UEMCPPIE
 		static FDelegateHandle GOnEndFrameHandle;
 		static bool GTickerBound = false;
 		static int32 GIdCounter = 0;
+		static FPlayerResolver GPlayerResolver;
+		static FOnInjectionFinished GOnTapeFinished;
 
 		void StopContinuousInjection(
 			UEnhancedInputLocalPlayerSubsystem* Subsystem, UInputAction* Action)
@@ -114,19 +115,22 @@ namespace UEMCPPIE
 				return true;
 			}
 
-			PIEWorldResolver::FPlayerTarget Target;
-			if (!PIEWorldResolver::ResolvePlayer(RequestedPIEInstance, ClientIndex, Target, OutError))
+			if (!GPlayerResolver)
+			{
+				OutError = TEXT("No player resolver is installed in this process; pass the exact local player");
+				return false;
+			}
+			ULocalPlayer* Resolved = GPlayerResolver(RequestedPIEInstance, ClientIndex, OutError);
+			if (!Resolved)
 			{
 				return false;
 			}
 
-			OutSubsystem = Target.LocalPlayer
-				? Target.LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>()
-				: nullptr;
+			OutSubsystem = Resolved->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
 			if (!OutSubsystem)
 			{
 				OutError = FString::Printf(TEXT("EnhancedInputLocalPlayerSubsystem not available for PIE instance %d local player %d"),
-					Target.PIEInstance, ClientIndex);
+					RequestedPIEInstance, ClientIndex);
 				return false;
 			}
 
@@ -196,7 +200,9 @@ namespace UEMCPPIE
 				if (Tape.Index >= Tape.Values.Num())
 				{
 					StopTapeEntry(Tape);
+					const FString FinishedId = It->Key;
 					It.RemoveCurrent();
+					GOnTapeFinished.Broadcast(FinishedId);
 					continue;
 				}
 
@@ -222,6 +228,16 @@ namespace UEMCPPIE
 			GOnEndFrameHandle = FCoreDelegates::OnEndFrame.AddStatic(&TickEndOfFrame);
 			GTickerBound = true;
 		}
+	}
+
+	void FPIEInputInjector::SetPlayerResolver(FPlayerResolver Resolver)
+	{
+		GPlayerResolver = MoveTemp(Resolver);
+	}
+
+	FOnInjectionFinished& FPIEInputInjector::OnTapeFinished()
+	{
+		return GOnTapeFinished;
 	}
 
 	bool FPIEInputInjector::InjectOnce(UInputAction* Action, const FInputActionValue& Value,
