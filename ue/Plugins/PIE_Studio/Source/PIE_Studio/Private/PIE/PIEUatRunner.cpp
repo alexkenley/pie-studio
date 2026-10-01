@@ -724,11 +724,10 @@ namespace UEMCPPIE
 				return false;
 			}
 
-			FVector Location = A.Value;
-			FRotator Rotation(0, A.Yaw.Get(Pawn->GetActorRotation().Yaw), 0);
+			const FVector Requested = A.Value;
+			AActor* Target = nullptr;
 			if (!A.At.IsEmpty())
 			{
-				AActor* Target = nullptr;
 				for (TActorIterator<AActor> It(World); It && !Target; ++It)
 				{
 					if (It->GetName() == A.At || It->GetActorLabel() == A.At)
@@ -741,16 +740,31 @@ namespace UEMCPPIE
 					Err = FString::Printf(TEXT("place: no actor named or labelled %s in %s"), *A.At, *World->GetName());
 					return false;
 				}
-				Location = Target->GetActorTransform().TransformPosition(A.Offset);
-				if (A.bFace && !A.Yaw.IsSet())
+			}
+			const FVector Wanted = Target ? Target->GetActorTransform().TransformPosition(A.Offset) : Requested;
+
+			// The spot asked for, else the nearest free one around it: in a level with props an exact spot is often
+			// taken. Each candidate keeps facing the target when there is one.
+			FVector Location = Wanted;
+			FRotator Rotation(0, A.Yaw.Get(Pawn->GetActorRotation().Yaw), 0);
+			bool bPlaced = false;
+			for (int32 Ring = 0; Ring <= 6 && !bPlaced; ++Ring)
+			{
+				const int32 Count = Ring == 0 ? 1 : 12;
+				for (int32 i = 0; i < Count && !bPlaced; ++i)
 				{
-					Rotation.Yaw = (Target->GetActorLocation() - Location).Rotation().Yaw;
+					const double Angle = 2.0 * PI * i / Count;
+					Location = Wanted + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0) * (60.0 * Ring);
+					if (Target && A.bFace && !A.Yaw.IsSet())
+					{
+						Rotation.Yaw = (Target->GetActorLocation() - Location).Rotation().Yaw;
+					}
+					bPlaced = Pawn->TeleportTo(Location, Rotation);
 				}
 			}
-
-			if (!Pawn->TeleportTo(Location, Rotation))
+			if (!bPlaced)
 			{
-				Err = FString::Printf(TEXT("place: %s does not fit at %s"), *Pawn->GetName(), *Location.ToCompactString());
+				Err = FString::Printf(TEXT("place: %s fits nowhere within 360 units of %s"), *Pawn->GetName(), *Wanted.ToCompactString());
 				return false;
 			}
 			PC->SetControlRotation(Rotation);
