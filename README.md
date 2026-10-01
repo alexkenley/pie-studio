@@ -107,7 +107,7 @@ Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, 
 
 ### Windowless clients
 
-`pie.windowless: true` launches each separate-process client with `-RenderOffscreen`: the client renders every frame exactly as it would in a window (animation, hit traces and captures behave the same), but opens no window and never takes focus. Its frame rate is pinned to `pie.client_fps` (default 60) because no vsync paces an offscreen client. The run restores the play settings' launch parameters afterwards. `expect` rules take `min`/`max` match counts. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
+`pie.windowless: true` launches each separate-process client with `-RenderOffscreen`: the client renders every frame exactly as it would in a window (animation, hit traces and captures behave the same), but opens no window and never takes focus. Its frame rate is pinned to `pie.client_fps` (default 60) because no vsync paces an offscreen client. The run restores the play settings' launch parameters afterwards. `expect` rules take `min`/`max` match counts, and `since: "run"` to judge every line logged since PIE started (state set up while players joined) instead of only the step's own lines. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
 
 
 ## Frame Capture

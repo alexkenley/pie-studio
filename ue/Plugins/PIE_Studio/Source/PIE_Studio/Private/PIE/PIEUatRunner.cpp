@@ -13,6 +13,7 @@
 #include "FileHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Engine/GameViewportClient.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
@@ -83,8 +84,8 @@ namespace UEMCPPIE
 
 			void Begin()
 			{
-				Offset = FPlatformFileManager::Get().GetPlatformFile().FileSize(*Path);
-				Offset = FMath::Max<int64>(Offset, 0);
+				// A client process writes a fresh log file, so the whole file belongs to this run.
+				Offset = 0;
 				Partial.Reset();
 			}
 
@@ -158,6 +159,7 @@ namespace UEMCPPIE
 			FString Pattern;
 			int32 Min = 1;
 			int32 Max = -1;
+			bool bSinceRun = false; // judge every line since the run began, not only this step's
 		};
 
 		struct FUatStep
@@ -243,6 +245,16 @@ namespace UEMCPPIE
 			double N = 0;
 			if (O->TryGetNumberField(TEXT("min"), N)) Out.Min = static_cast<int32>(N);
 			if (O->TryGetNumberField(TEXT("max"), N)) Out.Max = static_cast<int32>(N);
+			FString Since;
+			if (O->TryGetStringField(TEXT("since"), Since))
+			{
+				if (!Since.Equals(TEXT("run"), ESearchCase::CaseSensitive) && !Since.Equals(TEXT("step"), ESearchCase::CaseSensitive))
+				{
+					Err = FString::Printf(TEXT("since must be \"step\" or \"run\", not \"%s\""), *Since);
+					return false;
+				}
+				Out.bSinceRun = Since == TEXT("run");
+			}
 			return true;
 		}
 
@@ -434,8 +446,31 @@ namespace UEMCPPIE
 			if (bWindowless && !bOneProcess)
 			{
 				// No window, so nothing takes focus; the frame rate is pinned because no vsync paces an offscreen client.
-				PS->AdditionalLaunchParameters = FString::Printf(TEXT("%s -RenderOffscreen -ExecCmds=\"t.MaxFPS %d,t.IdleWhenNotForeground 0\""),
-					*SavedLaunchParameters, ClientFps).TrimStart();
+				// The engine reads only the first -ExecCmds, so join an existing one rather than adding a second.
+				const FString Cmds = FString::Printf(TEXT("t.MaxFPS %d,t.IdleWhenNotForeground 0"), ClientFps);
+				FString LaunchParams = SavedLaunchParameters;
+				const int32 At = LaunchParams.Find(TEXT("-ExecCmds="));
+				if (At == INDEX_NONE)
+				{
+					LaunchParams += FString::Printf(TEXT(" -ExecCmds=\"%s\""), *Cmds);
+				}
+				else
+				{
+					const int32 ValueAt = At + FCString::Strlen(TEXT("-ExecCmds="));
+					if (LaunchParams.IsValidIndex(ValueAt) && LaunchParams[ValueAt] == TEXT('"'))
+					{
+						LaunchParams.InsertAt(ValueAt + 1, Cmds + TEXT(","));
+					}
+					else
+					{
+						// Unquoted: the value ends at the next space; quote it, since ours contains spaces.
+						int32 End = ValueAt;
+						while (LaunchParams.IsValidIndex(End) && !FChar::IsWhitespace(LaunchParams[End])) ++End;
+						const FString Existing = LaunchParams.Mid(ValueAt, End - ValueAt);
+						LaunchParams = LaunchParams.Left(ValueAt) + TEXT("\"") + Cmds + (Existing.IsEmpty() ? TEXT("") : TEXT(",")) + Existing + TEXT("\"") + LaunchParams.Mid(End);
+					}
+				}
+				PS->AdditionalLaunchParameters = (LaunchParams + TEXT(" -RenderOffscreen")).TrimStart();
 			}
 
 			FRequestPlaySessionParams Params;
@@ -510,14 +545,14 @@ namespace UEMCPPIE
 		{
 			if (Rule.Client == 0 || bOneProcess)
 			{
-				HostLog.CopyFrom(HostMark, Out);
+				HostLog.CopyFrom(Rule.bSinceRun ? 0 : HostMark, Out);
 				return;
 			}
 			const FClientLogTail* Tail = ClientLogs.Find(Rule.Client);
 			const int32* Mark = ClientMarks.Find(Rule.Client);
 			if (Tail && Mark)
 			{
-				for (int32 i = *Mark; i < Tail->Lines.Num(); ++i) { Out.Add(Tail->Lines[i]); }
+				for (int32 i = Rule.bSinceRun ? 0 : *Mark; i < Tail->Lines.Num(); ++i) { Out.Add(Tail->Lines[i]); }
 			}
 		}
 
@@ -746,12 +781,20 @@ namespace UEMCPPIE
 				StepCaptures.Add({ A.Client, File, nullptr });
 				return true;
 			}
+			UWorld* Server = PIERemotePlayers::FindServerWorld();
+			const FWorldContext* HostContext = Server ? GEditor->GetWorldContextFromWorld(Server) : nullptr;
+			if (!HostContext || !HostContext->GameViewport || !HostContext->GameViewport->Viewport)
+			{
+				Err = TEXT("capture: the host player has no viewport");
+				return false;
+			}
 			if (!HostCapture.IsValid())
 			{
 				HostCapture = FSceneViewExtensions::NewExtension<FPIEViewportCapture>();
 				HostCapture->SetOutputFormat(/*bJpeg*/ true, 85);
 				HostCapture->SetEnabled(true);
 			}
+			HostCapture->SetTargetViewport(HostContext->GameViewport->Viewport);
 			IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 			TSharedPtr<int32> Written = MakeShared<int32>(0);
 			HostCapture->RequestCapture(Path, [Written](bool bOk) { *Written = bOk ? 1 : 2; });

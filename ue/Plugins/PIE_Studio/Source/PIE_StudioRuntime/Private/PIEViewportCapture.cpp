@@ -65,8 +65,18 @@ FPIEViewportCapture::~FPIEViewportCapture()
 bool FPIEViewportCapture::IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const
 {
 	if (!bEnabled.load(std::memory_order_acquire)) return false;
+	// A targeted capture reads exactly that viewport; one PIE process can hold several players' viewports.
+	if (const FViewport* Target = TargetViewport.load(std::memory_order_acquire))
+	{
+		return Context.Viewport == Target;
+	}
 	if (!GEngine || !GEngine->GameViewport) return false;
 	return Context.Viewport == GEngine->GameViewport->Viewport;
+}
+
+void FPIEViewportCapture::SetTargetViewport(const FViewport* Viewport)
+{
+	TargetViewport.store(Viewport, std::memory_order_release);
 }
 
 void FPIEViewportCapture::SetEnabled(bool bEnable)
@@ -74,15 +84,14 @@ void FPIEViewportCapture::SetEnabled(bool bEnable)
 	bEnabled.store(bEnable, std::memory_order_release);
 	if (!bEnable)
 	{
-		FOnCaptureWritten Dropped;
+		TArray<FPendingRequest> Dropped;
 		{
 			FScopeLock SL(&Lock);
-			PendingPath.Reset();
-			Dropped = MoveTemp(PendingOnWritten);
+			Dropped = MoveTemp(Pending);
 		}
-		if (Dropped)
+		for (FPendingRequest& Request : Dropped)
 		{
-			Dropped(false);
+			if (Request.OnWritten) Request.OnWritten(false);
 		}
 		// Drain outstanding GPU copies so their PNGs get written and the RHI
 		// resources are released on the render thread before we're torn down.
@@ -92,17 +101,8 @@ void FPIEViewportCapture::SetEnabled(bool bEnable)
 
 void FPIEViewportCapture::RequestCapture(const FString& OutputPath, FOnCaptureWritten OnWritten)
 {
-	FOnCaptureWritten Superseded;
-	{
-		FScopeLock SL(&Lock);
-		PendingPath = OutputPath;
-		Superseded = MoveTemp(PendingOnWritten);
-		PendingOnWritten = MoveTemp(OnWritten);
-	}
-	if (Superseded)
-	{
-		Superseded(false);
-	}
+	FScopeLock SL(&Lock);
+	Pending.Add({ OutputPath, MoveTemp(OnWritten) });
 }
 
 namespace
@@ -253,27 +253,36 @@ void FPIEViewportCapture::PostRenderViewFamily_RenderThread(
 	// Retire any completed copies from earlier frames first. Never blocks.
 	ProcessReadbacks_RenderThread(GraphBuilder.RHICmdList, /*bDrainAll=*/false);
 
-	FString Path;
-	FOnCaptureWritten OnWritten;
+	// Every request queued since the last frame reads this frame.
+	TArray<FPendingRequest> Requests;
 	{
 		FScopeLock SL(&Lock);
-		if (PendingPath.IsEmpty()) return;
-		Path = PendingPath;
-		PendingPath.Reset();
-		OnWritten = MoveTemp(PendingOnWritten);
+		Requests = MoveTemp(Pending);
 	}
+	if (Requests.Num() == 0) return;
 
 	const FRenderTarget* RT = InViewFamily.RenderTarget;
 	FTextureRHIRef Texture = RT ? RT->GetRenderTargetTexture() : FTextureRHIRef();
 	const FIntPoint Size = RT ? RT->GetSizeXY() : FIntPoint::ZeroValue;
 	if (!Texture.IsValid() || Size.X <= 0 || Size.Y <= 0)
 	{
-		NotifyCaptureWritten(MoveTemp(OnWritten), false);
+		for (FPendingRequest& Request : Requests)
+		{
+			NotifyCaptureWritten(MoveTemp(Request.OnWritten), false);
+		}
 		return;
 	}
 
 	const EPixelFormat Format = Texture->GetFormat();
+	for (FPendingRequest& Request : Requests)
+	{
+		EnqueueReadback_RenderThread(GraphBuilder, Texture, Size, Format, Request.Path, MoveTemp(Request.OnWritten));
+	}
+}
 
+void FPIEViewportCapture::EnqueueReadback_RenderThread(FRDGBuilder& GraphBuilder, FTextureRHIRef Texture, FIntPoint Size,
+	EPixelFormat Format, const FString& Path, FOnCaptureWritten OnWritten)
+{
 	// Enqueue an async GPU->CPU copy inside an RDG pass so it runs after the
 	// scene has finished rendering. Unlike ReadSurfaceData this does not stall
 	// the render thread; we poll for completion on a later frame.

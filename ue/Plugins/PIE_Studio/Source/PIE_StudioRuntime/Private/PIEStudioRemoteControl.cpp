@@ -7,6 +7,7 @@
 #include "Misc/Paths.h"
 #include "SceneViewExtension.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/GameViewportClient.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
@@ -215,6 +216,15 @@ void UPIEStudioRemoteControl::ClientCapture_Implementation(const FString& Id, co
 		Capture->SetOutputFormat(OutputPath.EndsWith(TEXT(".jpg")) || OutputPath.EndsWith(TEXT(".jpeg")), 85);
 		Capture->SetEnabled(true);
 	}
+	// This player's own viewport: in one-process PIE every player's viewport lives in the same process.
+	const APlayerController* PC = Cast<APlayerController>(GetOwner());
+	const ULocalPlayer* LocalPlayer = PC ? PC->GetLocalPlayer() : nullptr;
+	if (!LocalPlayer || !LocalPlayer->ViewportClient || !LocalPlayer->ViewportClient->Viewport)
+	{
+		Report(Id, false, true, TEXT("this player has no viewport to capture"));
+		return;
+	}
+	Capture->SetTargetViewport(LocalPlayer->ViewportClient->Viewport);
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), /*Tree*/ true);
 	TWeakObjectPtr<UPIEStudioRemoteControl> WeakThis(this);
 	Capture->RequestCapture(OutputPath, [WeakThis, Id, OutputPath](bool bWritten)

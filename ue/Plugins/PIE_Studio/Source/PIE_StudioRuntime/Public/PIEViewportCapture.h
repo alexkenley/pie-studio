@@ -6,6 +6,7 @@
 #include <atomic>
 
 class FRHIGPUTextureReadback;
+class FViewport;
 
 namespace UEMCPPIE
 {
@@ -26,6 +27,8 @@ public:
 	using FOnCaptureWritten = TFunction<void(bool bWritten)>;
 
 	void SetEnabled(bool bEnable);
+	/** Read this viewport only. Unset, the capture reads GEngine's game viewport, the only one in a -game process. */
+	void SetTargetViewport(const FViewport* Viewport);
 	void RequestCapture(const FString& OutputPath, FOnCaptureWritten OnWritten = nullptr);
 	int32 GetCapturedCount() const;
 
@@ -57,14 +60,18 @@ private:
 	// completed one off to a background PNG write. Render thread only.
 	void ProcessReadbacks_RenderThread(FRHICommandListImmediate& RHICmdList, bool bDrainAll);
 
+	void EnqueueReadback_RenderThread(FRDGBuilder& GraphBuilder, FTextureRHIRef Texture, FIntPoint Size,
+		EPixelFormat Format, const FString& Path, FOnCaptureWritten OnWritten);
+
 	TArray<FInFlightReadback> InFlight;
 
 	std::atomic<bool> bEnabled{false};
 	std::atomic<bool> bUseJpeg{true};
 	std::atomic<int32> JpegQuality{80};
 	mutable FCriticalSection Lock;
-	FString PendingPath;
-	FOnCaptureWritten PendingOnWritten;
+	struct FPendingRequest { FString Path; FOnCaptureWritten OnWritten; };
+	TArray<FPendingRequest> Pending;
+	std::atomic<const FViewport*> TargetViewport{nullptr};
 	std::atomic<int32> CapturedCount{0};
 };
 
