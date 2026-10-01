@@ -128,4 +128,7 @@ To verify multiplayer behaviour without a human, write a scenario and call
 `uat_run` (see the README): it opens the map, starts PIE, drives each step and
 judges it from the host log and the log file each client reports when it joins. Poll
 `uat_status`; read `report.md` from `report_dir`. Log-based checks need the
-game to log what it does; add the log line before writing the step.
+game to log what it does; add the log line before writing the step. For what
+only a picture shows, add `{client, capture: "label"}` and read the image from
+the step's `captures`. Set `pie.windowless: true` so client processes render
+offscreen and never steal focus from whoever is using the machine.

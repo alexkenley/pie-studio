@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Engine/NetSerialization.h"
+#include "PIEViewportCapture.h"
 #include "PIEStudioRemoteControl.generated.h"
 
 /** The outcome of one request a remote player ran, as the server last heard it. */
@@ -59,6 +60,8 @@ public:
 	void SendStop(const FString& Id);
 	void SendTape(const FString& Id, const FSoftObjectPath& Action, const TArray<FVector>& Values);
 	void SendConsole(const FString& Id, const FString& Command);
+	/** The owning client saves its viewport to OutputPath (same machine; absolute) and reports when written. */
+	void SendCapture(const FString& Id, const FString& OutputPath);
 
 	/** Most input values a single tape request may carry. */
 	static constexpr int32 MaxTapeFrames = 3600;
@@ -86,6 +89,9 @@ private:
 	UFUNCTION(Client, Reliable)
 	void ClientConsole(const FString& Id, const FString& Command);
 
+	UFUNCTION(Client, Reliable)
+	void ClientCapture(const FString& Id, const FString& OutputPath);
+
 	UFUNCTION(Server, Reliable)
 	void ServerReady(const FString& LogFile);
 
@@ -105,4 +111,7 @@ private:
 	// Client state: tapes this component started, so their completion is reported to the server.
 	TSet<FString> OwnedTapes;
 	FDelegateHandle TapeFinishedHandle;
+
+	// Client state: reads this process's game viewport, created on the first capture request.
+	TSharedPtr<UEMCPPIE::FPIEViewportCapture> Capture;
 };

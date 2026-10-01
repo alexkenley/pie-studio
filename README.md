@@ -103,7 +103,11 @@ The runtime half lives in the `PIE_StudioRuntime` module (`DeveloperTool`), whic
 }
 ```
 
-Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"`, `place {at, offset, face}` or `place {location, yaw}` (each with `client`), and `wait_ms`. `place` teleports that player's pawn on the server: next to the actor named or labelled `at` (`offset` in its local frame, default 300 units in front, facing it), or to an absolute `location`. `expect` rules take `min`/`max` match counts. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
+Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"`, `place {at, offset, face}` or `place {location, yaw}` (each with `client`), and `wait_ms`. `place` teleports that player's pawn on the server: next to the actor named or labelled `at` (`offset` in its local frame, default 300 units in front, facing it), or to an absolute `location`. `capture` (a label, or `true`) saves that player's view as a JPEG under the report's `captures/` folder; the step fails if the image is not written, and `report.md` embeds every capture next to its step, so a vision pass can judge what the logs cannot show.
+
+### Windowless clients
+
+`pie.windowless: true` launches each separate-process client with `-RenderOffscreen`: the client renders every frame exactly as it would in a window (animation, hit traces and captures behave the same), but opens no window and never takes focus. Its frame rate is pinned to `pie.client_fps` (default 60) because no vsync paces an offscreen client. The run restores the play settings' launch parameters afterwards. `expect` rules take `min`/`max` match counts. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
 
 
 ## Frame Capture

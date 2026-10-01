@@ -10,7 +10,7 @@ class FRHIGPUTextureReadback;
 namespace UEMCPPIE
 {
 
-class FPIEViewportCapture : public FSceneViewExtensionBase
+class PIE_STUDIORUNTIME_API FPIEViewportCapture : public FSceneViewExtensionBase
 {
 public:
 	FPIEViewportCapture(const FAutoRegister& AutoReg);
@@ -22,8 +22,11 @@ public:
 	virtual void PostRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override;
 	virtual bool IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const override;
 
+	/** Called on the game thread once the image is written (true) or could not be (false). */
+	using FOnCaptureWritten = TFunction<void(bool bWritten)>;
+
 	void SetEnabled(bool bEnable);
-	void RequestCapture(const FString& OutputPath);
+	void RequestCapture(const FString& OutputPath, FOnCaptureWritten OnWritten = nullptr);
 	int32 GetCapturedCount() const;
 
 	// Output encoding for subsequent captures. JPEG (default) is far smaller and
@@ -47,6 +50,7 @@ private:
 		bool bSwapRB = false;
 		bool bJpeg = true;
 		int32 Quality = 80;
+		FOnCaptureWritten OnWritten;
 	};
 
 	// Poll (or, when bDrainAll, block on) in-flight readbacks and hand each
@@ -60,6 +64,7 @@ private:
 	std::atomic<int32> JpegQuality{80};
 	mutable FCriticalSection Lock;
 	FString PendingPath;
+	FOnCaptureWritten PendingOnWritten;
 	std::atomic<int32> CapturedCount{0};
 };
 

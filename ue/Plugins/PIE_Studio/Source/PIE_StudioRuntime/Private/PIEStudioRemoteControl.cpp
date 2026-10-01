@@ -3,6 +3,9 @@
 #include "PIE_StudioRuntimeModule.h"
 #include "PIEInputInjector.h"
 #include "HAL/PlatformOutputDevices.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
+#include "SceneViewExtension.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
@@ -63,6 +66,11 @@ void UPIEStudioRemoteControl::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		UEMCPPIE::FPIEInputInjector::StopAny(Id);
 	}
 	OwnedTapes.Reset();
+	if (Capture.IsValid())
+	{
+		Capture->SetEnabled(false);
+		Capture.Reset();
+	}
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -100,6 +108,12 @@ void UPIEStudioRemoteControl::SendTape(const FString& Id, const FSoftObjectPath&
 		Quantized.Add(V);
 	}
 	ClientTape(Id, Action, Quantized);
+}
+
+void UPIEStudioRemoteControl::SendCapture(const FString& Id, const FString& OutputPath)
+{
+	Results.Remove(Id);
+	ClientCapture(Id, OutputPath);
 }
 
 void UPIEStudioRemoteControl::SendConsole(const FString& Id, const FString& Command)
@@ -191,6 +205,25 @@ void UPIEStudioRemoteControl::ClientTape_Implementation(const FString& Id, const
 		}
 	}
 	Report(Id, bOk, false, Error);
+}
+
+void UPIEStudioRemoteControl::ClientCapture_Implementation(const FString& Id, const FString& OutputPath)
+{
+	if (!Capture.IsValid())
+	{
+		Capture = FSceneViewExtensions::NewExtension<UEMCPPIE::FPIEViewportCapture>();
+		Capture->SetOutputFormat(OutputPath.EndsWith(TEXT(".jpg")) || OutputPath.EndsWith(TEXT(".jpeg")), 85);
+		Capture->SetEnabled(true);
+	}
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), /*Tree*/ true);
+	TWeakObjectPtr<UPIEStudioRemoteControl> WeakThis(this);
+	Capture->RequestCapture(OutputPath, [WeakThis, Id, OutputPath](bool bWritten)
+	{
+		if (UPIEStudioRemoteControl* Self = WeakThis.Get())
+		{
+			Self->Report(Id, bWritten, true, bWritten ? FString() : FString::Printf(TEXT("the viewport could not be saved to %s"), *OutputPath));
+		}
+	});
 }
 
 void UPIEStudioRemoteControl::ClientConsole_Implementation(const FString& Id, const FString& Command)

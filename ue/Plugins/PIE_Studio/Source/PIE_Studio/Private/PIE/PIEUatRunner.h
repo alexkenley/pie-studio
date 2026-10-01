@@ -8,12 +8,13 @@
  * input and console through PIERemotePlayers, and decides each step from the logs.
  *
  * Scenario JSON:
- *   { name, map?, pie: { players, net_mode: "listen"|"dedicated", one_process }, join_timeout_s, settle_ms,
+ *   { name, map?, pie: { players, net_mode: "listen"|"dedicated", one_process, windowless?, client_fps? }, join_timeout_s, settle_ms,
  *     steps: [ { name,
  *                do: [ { client, tape: {action, values} } | { client, press: {action, frames?} }
  *                    | { client, hold: {action, value, ms} } | { client, inject: {action, value} }
  *                    | { client, console: "cmd" }
- *                    | { client, place: {at, offset?, face?} | {location, yaw?} } | { wait_ms } ],
+ *                    | { client, place: {at, offset?, face?} | {location, yaw?} } | { client, capture: "label" | true }
+ *                    | { wait_ms } ],
  *                expect: [ { log: "host"|"client:N", pattern, min?, max? } ],
  *                forbid: [ { log, pattern } ],
  *                window_ms } ] }

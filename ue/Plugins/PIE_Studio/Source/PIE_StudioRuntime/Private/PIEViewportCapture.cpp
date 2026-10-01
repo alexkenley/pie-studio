@@ -1,5 +1,5 @@
 #include "PIEViewportCapture.h"
-#include "PIE_StudioModule.h"
+#include "PIE_StudioRuntimeModule.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "RHIGPUReadback.h"
@@ -72,9 +72,15 @@ void FPIEViewportCapture::SetEnabled(bool bEnable)
 	bEnabled.store(bEnable, std::memory_order_release);
 	if (!bEnable)
 	{
+		FOnCaptureWritten Dropped;
 		{
 			FScopeLock SL(&Lock);
 			PendingPath.Reset();
+			Dropped = MoveTemp(PendingOnWritten);
+		}
+		if (Dropped)
+		{
+			Dropped(false);
 		}
 		// Drain outstanding GPU copies so their PNGs get written and the RHI
 		// resources are released on the render thread before we're torn down.
@@ -82,10 +88,30 @@ void FPIEViewportCapture::SetEnabled(bool bEnable)
 	}
 }
 
-void FPIEViewportCapture::RequestCapture(const FString& OutputPath)
+void FPIEViewportCapture::RequestCapture(const FString& OutputPath, FOnCaptureWritten OnWritten)
 {
-	FScopeLock SL(&Lock);
-	PendingPath = OutputPath;
+	FOnCaptureWritten Superseded;
+	{
+		FScopeLock SL(&Lock);
+		PendingPath = OutputPath;
+		Superseded = MoveTemp(PendingOnWritten);
+		PendingOnWritten = MoveTemp(OnWritten);
+	}
+	if (Superseded)
+	{
+		Superseded(false);
+	}
+}
+
+namespace
+{
+	void NotifyCaptureWritten(FPIEViewportCapture::FOnCaptureWritten OnWritten, bool bWritten)
+	{
+		if (OnWritten)
+		{
+			AsyncTask(ENamedThreads::GameThread, [OnWritten = MoveTemp(OnWritten), bWritten]() { OnWritten(bWritten); });
+		}
+	}
 }
 
 void FPIEViewportCapture::SetOutputFormat(bool bInUseJpeg, int32 InQuality)
@@ -142,14 +168,18 @@ void FPIEViewportCapture::ProcessReadbacks_RenderThread(FRHICommandListImmediate
 
 			CapturedCount.fetch_add(1, std::memory_order_relaxed);
 			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-				[Pix = MoveTemp(Pixels), W, H, Path = R.Path, bJpeg = R.bJpeg, Quality = R.Quality]()
+				[Pix = MoveTemp(Pixels), W, H, Path = R.Path, bJpeg = R.bJpeg, Quality = R.Quality, OnWritten = MoveTemp(R.OnWritten)]() mutable
 				{
-					EncodeColorsToFile(Pix, W, H, bJpeg, Quality, Path);
+					NotifyCaptureWritten(MoveTemp(OnWritten), EncodeColorsToFile(Pix, W, H, bJpeg, Quality, Path));
 				});
 		}
-		else if (Data)
+		else
 		{
-			R.Readback->Unlock();
+			if (Data)
+			{
+				R.Readback->Unlock();
+			}
+			NotifyCaptureWritten(MoveTemp(R.OnWritten), false);
 		}
 
 		InFlight.RemoveAt(i);
@@ -175,21 +205,23 @@ void FPIEViewportCapture::PostRenderViewFamily_RenderThread(
 	ProcessReadbacks_RenderThread(GraphBuilder.RHICmdList, /*bDrainAll=*/false);
 
 	FString Path;
+	FOnCaptureWritten OnWritten;
 	{
 		FScopeLock SL(&Lock);
 		if (PendingPath.IsEmpty()) return;
 		Path = PendingPath;
 		PendingPath.Reset();
+		OnWritten = MoveTemp(PendingOnWritten);
 	}
 
 	const FRenderTarget* RT = InViewFamily.RenderTarget;
-	if (!RT) return;
-
-	FTextureRHIRef Texture = RT->GetRenderTargetTexture();
-	if (!Texture.IsValid()) return;
-
-	const FIntPoint Size = RT->GetSizeXY();
-	if (Size.X <= 0 || Size.Y <= 0) return;
+	FTextureRHIRef Texture = RT ? RT->GetRenderTargetTexture() : FTextureRHIRef();
+	const FIntPoint Size = RT ? RT->GetSizeXY() : FIntPoint::ZeroValue;
+	if (!Texture.IsValid() || Size.X <= 0 || Size.Y <= 0)
+	{
+		NotifyCaptureWritten(MoveTemp(OnWritten), false);
+		return;
+	}
 
 	const bool bSwapRB = (Texture->GetFormat() == PF_R8G8B8A8);
 
@@ -218,6 +250,7 @@ void FPIEViewportCapture::PostRenderViewFamily_RenderThread(
 	Entry.bSwapRB = bSwapRB;
 	Entry.bJpeg = bUseJpeg.load(std::memory_order_acquire);
 	Entry.Quality = JpegQuality.load(std::memory_order_acquire);
+	Entry.OnWritten = MoveTemp(OnWritten);
 	InFlight.Add(MoveTemp(Entry));
 }
 

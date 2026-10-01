@@ -15,6 +15,13 @@ public class PIE_StudioRuntime : ModuleRules
 			"Engine",
 			"EnhancedInput",
 			"InputCore",
+			"RenderCore",
+			"RHI",
+		});
+
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			"ImageWrapper",
 		});
 	}
 }

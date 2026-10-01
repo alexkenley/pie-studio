@@ -4,6 +4,9 @@
 #include "PIEInputInjector.h"
 #include "PIERemotePlayers.h"
 #include "PIEStudioRemoteControl.h"
+#include "PIEViewportCapture.h"
+#include "SceneViewExtension.h"
+#include "HAL/FileManager.h"
 #include "Containers/Ticker.h"
 #include "Dom/JsonValue.h"
 #include "Editor.h"
@@ -134,7 +137,7 @@ namespace UEMCPPIE
 
 		struct FUatAction
 		{
-			enum class EKind { Tape, Hold, Inject, Console, Wait, Place } Kind = EKind::Wait;
+			enum class EKind { Tape, Hold, Inject, Console, Wait, Place, Capture } Kind = EKind::Wait;
 			int32 Client = 0;
 			FString ActionPath;
 			TArray<FVector> Values;
@@ -171,6 +174,7 @@ namespace UEMCPPIE
 			FString Name;
 			FString Verdict; // PASS | FAIL | SKIPPED
 			TArray<FString> Details;
+			TArray<FString> Captures; // images written during the step, relative to the report directory
 		};
 
 		FVector ParseVector(const TSharedPtr<FJsonValue>& V)
@@ -336,7 +340,21 @@ namespace UEMCPPIE
 				Err = TEXT("place needs at (an actor name or label) or location");
 				return false;
 			}
-			Err = TEXT("an action must be one of tape, press, hold, inject, console, place, wait_ms");
+			if (const TSharedPtr<FJsonValue> Capture = O->TryGetField(TEXT("capture")))
+			{
+				Out.Kind = FUatAction::EKind::Capture;
+				if (Capture->Type == EJson::String)
+				{
+					Out.Command = FPaths::MakeValidFileName(Capture->AsString());
+				}
+				else if (Capture->Type != EJson::Boolean || !Capture->AsBool())
+				{
+					Err = TEXT("capture takes a label (string) or true");
+					return false;
+				}
+				return true;
+			}
+			Err = TEXT("an action must be one of tape, press, hold, inject, console, place, capture, wait_ms");
 			return false;
 		}
 	}
@@ -372,6 +390,14 @@ namespace UEMCPPIE
 		// Requests relayed to remote players in the current step; each must be confirmed applied.
 		struct FUatRelayed { FString Id; int32 Client; FString What; };
 		TArray<FUatRelayed> Relayed;
+		// Captures taken in the current step. Host captures report through Written (0 pending, 1 written, 2 failed).
+		struct FUatCapture { int32 Client; FString File; TSharedPtr<int32> Written; };
+		TArray<FUatCapture> StepCaptures;
+		TSharedPtr<FPIEViewportCapture> HostCapture;
+
+		// Separate-process clients render offscreen (no window) at a fixed frame rate.
+		bool bWindowless = false;
+		int32 ClientFps = 60;
 
 		// Evidence.
 		FHostLogCapture HostLog;
@@ -381,6 +407,7 @@ namespace UEMCPPIE
 		EPlayNetMode SavedNetMode = PIE_Standalone;
 		int32 SavedClients = 1;
 		bool SavedOneProcess = true;
+		FString SavedLaunchParameters;
 
 		FTSTicker::FDelegateHandle TickHandle;
 
@@ -399,10 +426,17 @@ namespace UEMCPPIE
 			PS->GetPlayNetMode(SavedNetMode);
 			PS->GetPlayNumberOfClients(SavedClients);
 			PS->GetRunUnderOneProcess(SavedOneProcess);
+			SavedLaunchParameters = PS->AdditionalLaunchParameters;
 
 			PS->SetPlayNetMode(bListen ? PIE_ListenServer : PIE_Client);
 			PS->SetPlayNumberOfClients(Players);
 			PS->SetRunUnderOneProcess(bOneProcess);
+			if (bWindowless && !bOneProcess)
+			{
+				// No window, so nothing takes focus; the frame rate is pinned because no vsync paces an offscreen client.
+				PS->AdditionalLaunchParameters = FString::Printf(TEXT("%s -RenderOffscreen -ExecCmds=\"t.MaxFPS %d,t.IdleWhenNotForeground 0\""),
+					*SavedLaunchParameters, ClientFps).TrimStart();
+			}
 
 			FRequestPlaySessionParams Params;
 			GEditor->RequestPlaySession(Params);
@@ -415,6 +449,7 @@ namespace UEMCPPIE
 			PS->SetPlayNetMode(SavedNetMode);
 			PS->SetPlayNumberOfClients(SavedClients);
 			PS->SetRunUnderOneProcess(SavedOneProcess);
+			PS->AdditionalLaunchParameters = SavedLaunchParameters;
 		}
 
 		int32 RemoteCount() const { return bListen ? Players - 1 : Players; }
@@ -561,8 +596,32 @@ namespace UEMCPPIE
 					R.Details.Add(FString::Printf(TEXT("FAIL client %d could not run %s: %s"), Req.Client, *Req.What, *Result->Error));
 				}
 			}
+			for (const FUatCapture& C : StepCaptures)
+			{
+				if (C.Written.IsValid() && *C.Written != 1)
+				{
+					bPass = false;
+					R.Details.Add(FString::Printf(TEXT("%s host capture %s"), *C.Written == 0 ? TEXT("MISS") : TEXT("FAIL"),
+						*C.Written == 0 ? *FString::Printf(TEXT("%s was not written in the window"), *C.File) : *FString::Printf(TEXT("%s could not be written"), *C.File)));
+					continue;
+				}
+				if (!C.Written.IsValid() && !IFileManager::Get().FileExists(*(ReportDir / C.File)))
+				{
+					continue; // a remote capture that did not land is already reported through its relayed result
+				}
+				R.Captures.Add(C.File);
+			}
 			R.Verdict = bPass ? TEXT("PASS") : TEXT("FAIL");
 			return R;
+		}
+
+		bool HostCapturesWritten() const
+		{
+			for (const FUatCapture& C : StepCaptures)
+			{
+				if (C.Written.IsValid() && *C.Written == 0) return false;
+			}
+			return true;
 		}
 
 		// Every relayed request has been answered.
@@ -579,7 +638,7 @@ namespace UEMCPPIE
 		// A step may end before its window only when nothing later in the window could change the verdict.
 		bool CanFinishEarly(const FUatStep& Step) const
 		{
-			if (Step.Forbid.Num() > 0 || Step.Expect.Num() == 0)
+			if (Step.Forbid.Num() > 0 || (Step.Expect.Num() == 0 && StepCaptures.Num() == 0))
 			{
 				return false;
 			}
@@ -587,7 +646,7 @@ namespace UEMCPPIE
 			{
 				if (Rule.Max >= 0) return false;
 			}
-			return ExpectationsMet(Step) && RelayedSettled();
+			return ExpectationsMet(Step) && RelayedSettled() && HostCapturesWritten();
 		}
 
 		static FInputActionValue ToValue(const UInputAction* Input, const FVector& Value)
@@ -667,6 +726,39 @@ namespace UEMCPPIE
 			return true;
 		}
 
+		/** Saves a player's view into the report's captures folder; the step checks it was written. */
+		bool RequestCapture(const FUatAction& A, FString& Err)
+		{
+			const FString Label = A.Command.IsEmpty() ? FString::FromInt(StepCaptures.Num() + 1) : A.Command;
+			const FString File = FString::Printf(TEXT("captures/step%02d_client%d_%s.jpg"), StepIndex + 1, A.Client, *Label);
+			const FString Path = ReportDir / File;
+			if (A.Client > 0)
+			{
+				UPIEStudioRemoteControl* Remote = PIERemotePlayers::Find(A.Client, Err);
+				if (!Remote)
+				{
+					return false;
+				}
+				const FString Id = PIERemotePlayers::NewId(TEXT("uat"));
+				PIERemotePlayers::RememberId(Id, Remote);
+				Remote->SendCapture(Id, Path);
+				Relayed.Add({ Id, A.Client, FString::Printf(TEXT("capture %s"), *File) });
+				StepCaptures.Add({ A.Client, File, nullptr });
+				return true;
+			}
+			if (!HostCapture.IsValid())
+			{
+				HostCapture = FSceneViewExtensions::NewExtension<FPIEViewportCapture>();
+				HostCapture->SetOutputFormat(/*bJpeg*/ true, 85);
+				HostCapture->SetEnabled(true);
+			}
+			IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+			TSharedPtr<int32> Written = MakeShared<int32>(0);
+			HostCapture->RequestCapture(Path, [Written](bool bOk) { *Written = bOk ? 1 : 2; });
+			StepCaptures.Add({ 0, File, Written });
+			return true;
+		}
+
 		bool RunAction(const FUatAction& A, FString& Err)
 		{
 			UInputAction* Input = nullptr;
@@ -683,6 +775,10 @@ namespace UEMCPPIE
 			if (A.Kind == FUatAction::EKind::Place)
 			{
 				return Place(A, Err);
+			}
+			if (A.Kind == FUatAction::EKind::Capture)
+			{
+				return RequestCapture(A, Err);
 			}
 
 			if (A.Client > 0)
@@ -762,6 +858,7 @@ namespace UEMCPPIE
 		{
 			HostMark = HostLog.Num();
 			Relayed.Reset();
+			StepCaptures.Reset();
 			ClientMarks.Reset();
 			for (const TPair<int32, FClientLogTail>& Pair : ClientLogs)
 			{
@@ -792,6 +889,11 @@ namespace UEMCPPIE
 			State = EState::Finished;
 			GLog->RemoveOutputDevice(&HostLog);
 			RestoreSettings();
+			if (HostCapture.IsValid())
+			{
+				HostCapture->SetEnabled(false);
+				HostCapture.Reset();
+			}
 			for (int32 i = Results.Num(); i < Steps.Num(); ++i)
 			{
 				Results.Add({ Steps[i].Name, TEXT("SKIPPED"), {} });
@@ -815,8 +917,6 @@ namespace UEMCPPIE
 
 		void WriteReport()
 		{
-			const FString Stamp = FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S"));
-			ReportDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("PIEStudio") / TEXT("UAT") / FString::Printf(TEXT("%s_%s"), *FPaths::MakeValidFileName(Name), *Stamp));
 			IFileManager::Get().MakeDirectory(*ReportDir, true);
 
 			FString Md = FString::Printf(TEXT("# UAT: %s\n\nVerdict: **%s**\n\n"), *Name, *OverallVerdict());
@@ -833,6 +933,15 @@ namespace UEMCPPIE
 				Md += FString::Printf(TEXT("## %d. %s: %s\n\n"), i + 1, *Results[i].Name, *Results[i].Verdict);
 				for (const FString& D : Results[i].Details) Md += FString::Printf(TEXT("- `%s`\n"), *D.Replace(TEXT("`"), TEXT("'")));
 				Md += TEXT("\n");
+			}
+			bool bAnyCapture = false;
+			for (int32 i = 0; i < Results.Num(); ++i)
+			{
+				for (const FString& C : Results[i].Captures)
+				{
+					if (!bAnyCapture) { Md += TEXT("## Captures\n\n"); bAnyCapture = true; }
+					Md += FString::Printf(TEXT("%d. %s: ![%s](%s)\n\n"), i + 1, *Results[i].Name, *FPaths::GetBaseFilename(C), *C);
+				}
 			}
 			FFileHelper::SaveStringToFile(Md, *(ReportDir / TEXT("report.md")), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 
@@ -871,6 +980,12 @@ namespace UEMCPPIE
 				TArray<TSharedPtr<FJsonValue>> Details;
 				for (const FString& D : Results[i].Details) Details.Add(MakeShared<FJsonValueString>(D));
 				R->SetArrayField(TEXT("details"), Details);
+				if (Results[i].Captures.Num())
+				{
+					TArray<TSharedPtr<FJsonValue>> Captures;
+					for (const FString& C : Results[i].Captures) Captures.Add(MakeShared<FJsonValueString>(ReportDir / C));
+					R->SetArrayField(TEXT("captures"), Captures);
+				}
 				Arr.Add(MakeShared<FJsonValueObject>(R));
 			}
 			S->SetArrayField(TEXT("results"), Arr);
@@ -1050,6 +1165,11 @@ namespace UEMCPPIE
 		{
 			Impl->RestoreSettings();
 		}
+		if (Impl->HostCapture.IsValid())
+		{
+			Impl->HostCapture->SetEnabled(false);
+			Impl->HostCapture.Reset();
+		}
 		if (Impl->TickHandle.IsValid())
 		{
 			FTSTicker::GetCoreTicker().RemoveTicker(Impl->TickHandle);
@@ -1124,12 +1244,12 @@ namespace UEMCPPIE
 			FString Mode;
 			if ((*Pie)->TryGetStringField(TEXT("net_mode"), Mode))
 			{
-				if (Mode != TEXT("listen") && Mode != TEXT("dedicated"))
+				if (!Mode.Equals(TEXT("listen"), ESearchCase::CaseSensitive) && !Mode.Equals(TEXT("dedicated"), ESearchCase::CaseSensitive))
 				{
 					OutError = FString::Printf(TEXT("pie.net_mode must be \"listen\" or \"dedicated\", not \"%s\""), *Mode);
 					return false;
 				}
-				Fresh.bListen = Mode == TEXT("listen");
+				Fresh.bListen = Mode.Equals(TEXT("listen"), ESearchCase::CaseSensitive);
 			}
 			// A dedicated server only stays inside the editor, where the run can read it, in one-process PIE.
 			bool b = !Fresh.bListen;
@@ -1139,6 +1259,22 @@ namespace UEMCPPIE
 			{
 				OutError = TEXT("net_mode \"dedicated\" needs one_process true: a separate-process dedicated server runs outside the editor, where the run cannot drive or read it");
 				return false;
+			}
+			(*Pie)->TryGetBoolField(TEXT("windowless"), Fresh.bWindowless);
+			if (Fresh.bWindowless && Fresh.bOneProcess)
+			{
+				OutError = TEXT("windowless applies to separate-process clients; set one_process false");
+				return false;
+			}
+			double Fps = 0;
+			if ((*Pie)->TryGetNumberField(TEXT("client_fps"), Fps))
+			{
+				if (Fps < 1 || Fps > 1000)
+				{
+					OutError = TEXT("pie.client_fps must be between 1 and 1000");
+					return false;
+				}
+				Fresh.ClientFps = static_cast<int32>(Fps);
 			}
 		}
 		double N = 0;
@@ -1206,9 +1342,10 @@ namespace UEMCPPIE
 					}
 				}
 			}
-			if (Step.Expect.Num() == 0 && Step.Forbid.Num() == 0)
+			const bool bCaptures = Step.Do.ContainsByPredicate([](const FUatAction& A) { return A.Kind == FUatAction::EKind::Capture; });
+			if (Step.Expect.Num() == 0 && Step.Forbid.Num() == 0 && !bCaptures)
 			{
-				OutError = FString::Printf(TEXT("step %d (%s) checks nothing; give it expect or forbid"), i + 1, *Step.Name);
+				OutError = FString::Printf(TEXT("step %d (%s) checks nothing; give it expect, forbid or a capture"), i + 1, *Step.Name);
 				return false;
 			}
 			Fresh.Steps.Add(MoveTemp(Step));
@@ -1232,7 +1369,12 @@ namespace UEMCPPIE
 		Impl->bOneProcess = Fresh.bOneProcess;
 		Impl->JoinTimeoutS = Fresh.JoinTimeoutS;
 		Impl->SettleMs = Fresh.SettleMs;
+		Impl->bWindowless = Fresh.bWindowless;
+		Impl->ClientFps = Fresh.ClientFps;
 		Impl->Steps = MoveTemp(Fresh.Steps);
+		Impl->ReportDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("PIEStudio") / TEXT("UAT") /
+			FString::Printf(TEXT("%s_%s"), *FPaths::MakeValidFileName(Impl->Name), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S"))));
+		IFileManager::Get().MakeDirectory(*Impl->ReportDir, true);
 
 		GLog->AddOutputDevice(&Impl->HostLog);
 		Impl->State = FImpl::EState::Starting;
