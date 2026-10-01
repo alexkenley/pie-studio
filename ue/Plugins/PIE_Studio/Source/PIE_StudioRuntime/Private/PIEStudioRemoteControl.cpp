@@ -9,6 +9,7 @@
 #include "Engine/LocalPlayer.h"
 #include "Engine/GameViewportClient.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
 
@@ -117,6 +118,12 @@ void UPIEStudioRemoteControl::SendCapture(const FString& Id, const FString& Outp
 	ClientCapture(Id, OutputPath);
 }
 
+void UPIEStudioRemoteControl::SendFace(const FString& Id, const FRotator& Rotation)
+{
+	Results.Remove(Id);
+	ClientFace(Id, Rotation);
+}
+
 void UPIEStudioRemoteControl::SendConsole(const FString& Id, const FString& Command)
 {
 	Results.Remove(Id);
@@ -206,6 +213,22 @@ void UPIEStudioRemoteControl::ClientTape_Implementation(const FString& Id, const
 		}
 	}
 	Report(Id, bOk, false, Error);
+}
+
+void UPIEStudioRemoteControl::ClientFace_Implementation(const FString& Id, FRotator Rotation)
+{
+	APlayerController* PC = Cast<APlayerController>(GetOwner());
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	if (!Pawn)
+	{
+		Report(Id, false, true, TEXT("this player has no pawn to turn"));
+		return;
+	}
+	// The autonomous client owns its pawn's facing; a rotation set on the server is overwritten by the next move.
+	PC->SetControlRotation(Rotation);
+	Pawn->SetActorRotation(FRotator(0.0, Rotation.Yaw, 0.0));
+	UE_LOG(LogPIEStudioRuntime, Log, TEXT("[PIEStudio] %s faces yaw %.0f"), *Pawn->GetName(), Rotation.Yaw);
+	Report(Id, true, true, FString());
 }
 
 void UPIEStudioRemoteControl::ClientCapture_Implementation(const FString& Id, const FString& OutputPath)
