@@ -51,6 +51,65 @@ Observation profiles are UDataAssets that control what gets sampled during repla
 | **Capture Montage** | Sample active anim montage name and position. |
 | **Drift Thresholds** | Minimum change to count as divergence. Filters physics/animation jitter. Position (cm), Rotation (deg), Velocity (cm/s), and a default for tracked values. |
 
+## Multiplayer PIE targeting
+
+Input, recording, replay, and observation actions accept optional `pie_instance`.
+It selects exact `FWorldContext::PIEInstance`; `client_id` remains local-player
+index inside selected world. Explicit selectors fail when instance is missing,
+dedicated-server-only, or missing requested local player.
+Supplied `pie_instance` values must be finite exact non-negative integers within the int32 range; invalid values are rejected rather than treated as automatic selection.
+
+When `pie_instance` is omitted, PIE Studio first prefers eligible
+`GEditor->PlayWorld`, then first eligible PIE/Game world containing requested
+local player. This avoids dedicated-server-first mismatch in multiplayer PIE.
+Selected world and player stay fixed for each recording, replay, observation
+session, hold, and tape.
+Unresolved recorder, replay, and observation targets are retried for up to 10
+seconds from `BeginPIE`; they then finalize as failures and retain `last_error`
+in their status responses, including after natural `EndPIE`.
+
+### Remote players
+
+With **Run Under One Process** off, every client is a separate `-game` process that the editor cannot reach directly. PIE Studio attaches a replicated control component to each remote player's controller on the server and relays commands over the game connection, so the same actions drive any player:
+
+- `clients` lists the session: net mode, the host player, and each remote player as `client` 1..N with a `ready` flag.
+- `inject_input`, `inject_input_start` and `inject_input_tape` take `client`; 1 or more relays to that remote player. `inject_input_update` and `inject_input_stop` route by the returned id.
+- `console` runs a command on the server (`client` 0) or on a remote player.
+- `remote_result` reports whether a relayed request was applied and, for tapes, finished.
+
+The runtime half lives in the `PIE_StudioRuntime` module (`DeveloperTool`), which loads in the client processes.
+
+## Multiplayer acceptance runs
+
+`uat_run` runs a scripted multiplayer acceptance test with no human at the keyboard. It opens the scenario's map, starts PIE with its players, waits for every remote player to join, then runs each step: drive input or console on any player, and judge the step from the logs. The evidence is the editor's own log plus each separate-process client's own log file, whose path the client reports when it joins (`clients` shows it as `log_file`). `log: "client:0"` is the listen server's player, which logs to the host log. A dedicated server needs `one_process: true` (the default for `dedicated`): a separate-process server runs outside the editor, where the run cannot drive or read it. When the run ends it stops PIE, restores the play settings and writes `Saved/PIEStudio/UAT/<name>_<stamp>/report.md` and `report.json`. Poll `uat_status`; `uat_abort` ends a run early.
+
+```json
+{
+  "name": "coop-attack",
+  "map": "/Game/Maps/Test/L_CombatTest",
+  "pie": { "players": 2, "net_mode": "listen", "one_process": false },
+  "steps": [
+    {
+      "name": "P2 attacks",
+      "do": [ { "client": 1, "press": { "action": "/Game/Input/IA_Primary.IA_Primary" } } ],
+      "expect": [
+        { "log": "client:1", "pattern": "\\[Attack\\]" },
+        { "log": "host", "pattern": "plays Light01" }
+      ],
+      "forbid": [ { "log": "host", "pattern": "Error" } ],
+      "window_ms": 4000
+    }
+  ]
+}
+```
+
+Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"`, `place {at, offset, face}` or `place {location, yaw}` (each with `client`), and `wait_ms`. `place` teleports that player's pawn on the server: next to the actor named or labelled `at` (`offset` in its local frame, default 300 units in front, facing it), or to an absolute `location`. `capture` (a label, or `true`) saves that player's view as a JPEG under the report's `captures/` folder; the step fails if the image is not written, and `report.md` embeds every capture next to its step, so a vision pass can judge what the logs cannot show.
+
+### Windowless clients
+
+`pie.windowless: true` launches each separate-process client with `-RenderOffscreen`: the client renders every frame exactly as it would in a window (animation, hit traces and captures behave the same), but opens no window and never takes focus. Its frame rate is pinned to `pie.client_fps` (default 60) because no vsync paces an offscreen client. The run restores the play settings' launch parameters afterwards. `expect` rules take `min`/`max` match counts, and `since: "run"` to judge every line logged since PIE started (state set up while players joined) instead of only the step's own lines. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
+
+
 ## Frame Capture
 
 When `capture_frame_every` is set, replay grabs viewport frames as **JPEGs** (kept on disk under `<recording>/frames/`) and composes a single labeled **contact sheet** at `<recording>/captures/contact_<timestamp>.jpg` — a grid montage of keyframes with the frame index drawn on each cell. A vision model reads stills, so the frames and the contact sheet are the useful artifacts; the paths come back in `replay_status.last_result` (`frame_dir`, `frame_count`, `contact_sheet_path`).
@@ -78,7 +137,7 @@ pie(action="record_read", id="some-recording", file="drift")
 
 ## MCP Actions
 
-45 actions in the `pie` category (provisioned by the plugin; call as `pie(action="...")`):
+58 actions in the `pie` category (provisioned by the plugin; call as `pie(action="...")`):
 
 - **Recording** — `record_arm`, `record_disarm`, `record_stop`, `record_status`, `record_list`, `record_read`, `record_delete`, `mark`
 - **Replay** — `replay_arm`, `replay_run` (unattended), `replay_disarm`, `replay_stop`, `replay_status` with drift tracking and viewport capture
@@ -87,6 +146,8 @@ pie(action="record_read", id="some-recording", file="drift")
 - **Reproduction tests** — `test_scaffold`, `test_run`, `test_list`
 - **Observation** — `observe_arm`, `observe_disarm`, `observe_stop`, `observe_status`, `observe_list`, `observe_read` with profile-based sampling
 - **Input injection** — `inject_input`, `inject_input_start`, `inject_input_update`, `inject_input_stop`, `inject_input_tape`
+- **Remote players** — `clients`, `console`, `remote_result`
+- **Acceptance runs** — `uat_run`, `uat_status`, `uat_abort`
 - **Profiles** — `profile_create`, `profile_read`, `profile_update`, `profile_delete`, `profile_list`
 - **Diff / Snapshot** — `record_diff`, `snapshot`
 - **PIE inspection** — `anim_state`, `anim_properties`, `subsystem_state`

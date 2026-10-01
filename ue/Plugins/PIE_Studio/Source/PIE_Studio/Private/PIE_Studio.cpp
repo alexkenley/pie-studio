@@ -2,7 +2,11 @@
 #include "Modules/ModuleManager.h"
 #include "MCPHandlerRegistration.h"
 #include "Handlers/GameplayHandlers.h"
-#include "PIE/PIEInputInjector.h"
+#include "PIEInputInjector.h"
+#include "PIE/PIERemotePlayers.h"
+#include "PIE/PIEUatRunner.h"
+#include "PIE/PIEWorldResolver.h"
+#include "Engine/LocalPlayer.h"
 #include "PIE/PIEInputRecorder.h"
 #include "PIE/PIEInputReplayer.h"
 #include "PIE/PIEObserver.h"
@@ -17,7 +21,14 @@ IMPLEMENT_MODULE(FPIE_StudioModule, PIE_Studio)
 
 void FPIE_StudioModule::StartupModule()
 {
-	UEMCPPIE::FPIEInputInjector::Init();
+	// The injector lives in PIE_StudioRuntime (so clients in their own process run it too); in the editor it resolves
+	// (pie_instance, client_id) through the PIE world resolver.
+	UEMCPPIE::FPIEInputInjector::SetPlayerResolver([](int32 PIEInstance, int32 ClientIndex, FString& OutError) -> ULocalPlayer*
+	{
+		UEMCPPIE::PIEWorldResolver::FPlayerTarget Target;
+		return UEMCPPIE::PIEWorldResolver::ResolvePlayer(PIEInstance, ClientIndex, Target, OutError) ? Target.LocalPlayer : nullptr;
+	});
+	UEMCPPIE::PIERemotePlayers::Init();
 	UEMCPPIE::FPIEInputRecorder::Get().Init();
 	UEMCPPIE::FPIEInputReplayer::Get().Init();
 	UEMCPPIE::FPIEObserver::Get().Init();
@@ -40,6 +51,16 @@ void FPIE_StudioModule::StartupModule()
 	UEMCP::RegisterExternalHandler(TEXT("inject_input_update"), &FGameplayHandlers::InjectInputUpdate);
 	UEMCP::RegisterExternalHandler(TEXT("inject_input_stop"), &FGameplayHandlers::InjectInputStop);
 	UEMCP::RegisterExternalHandler(TEXT("inject_input_tape"), &FGameplayHandlers::InjectInputTape);
+
+	// Multiplayer players
+	UEMCP::RegisterExternalHandler(TEXT("clients"), &FGameplayHandlers::PieClients);
+	UEMCP::RegisterExternalHandler(TEXT("console"), &FGameplayHandlers::PieConsole);
+	UEMCP::RegisterExternalHandler(TEXT("remote_result"), &FGameplayHandlers::PieRemoteResult);
+
+	// Multiplayer acceptance runs
+	UEMCP::RegisterExternalHandler(TEXT("uat_run"), &FGameplayHandlers::PieUatRun);
+	UEMCP::RegisterExternalHandler(TEXT("uat_status"), &FGameplayHandlers::PieUatStatus);
+	UEMCP::RegisterExternalHandler(TEXT("uat_abort"), &FGameplayHandlers::PieUatAbort);
 
 	// Recording
 	UEMCP::RegisterExternalHandler(TEXT("record_arm"), &FGameplayHandlers::PieRecordArm);
@@ -129,7 +150,8 @@ void FPIE_StudioModule::StartupModule()
 			{
 				return UEMCPPIE::FPIEInputRecorder::Get().IsActive()
 				    || UEMCPPIE::FPIEInputReplayer::Get().IsActive()
-				    || UEMCPPIE::FPIEObserver::Get().IsActive();
+				    || UEMCPPIE::FPIEObserver::Get().IsActive()
+				    || UEMCPPIE::FPIEUatRunner::Get().IsRunning();
 			});
 			GEditor->ShouldDisableCPUThrottlingDelegates.Add(Suppress);
 			return false;
@@ -150,6 +172,12 @@ void FPIE_StudioModule::ShutdownModule()
 	UEMCP::UnregisterExternalHandler(TEXT("inject_input_update"));
 	UEMCP::UnregisterExternalHandler(TEXT("inject_input_stop"));
 	UEMCP::UnregisterExternalHandler(TEXT("inject_input_tape"));
+	UEMCP::UnregisterExternalHandler(TEXT("clients"));
+	UEMCP::UnregisterExternalHandler(TEXT("console"));
+	UEMCP::UnregisterExternalHandler(TEXT("remote_result"));
+	UEMCP::UnregisterExternalHandler(TEXT("uat_run"));
+	UEMCP::UnregisterExternalHandler(TEXT("uat_status"));
+	UEMCP::UnregisterExternalHandler(TEXT("uat_abort"));
 	UEMCP::UnregisterExternalHandler(TEXT("record_arm"));
 	UEMCP::UnregisterExternalHandler(TEXT("record_disarm"));
 	UEMCP::UnregisterExternalHandler(TEXT("record_stop"));
@@ -202,5 +230,8 @@ void FPIE_StudioModule::ShutdownModule()
 	UEMCPPIE::FPIEObserver::Get().Shutdown();
 	UEMCPPIE::FPIEInputReplayer::Get().Shutdown();
 	UEMCPPIE::FPIEInputRecorder::Get().Shutdown();
-	UEMCPPIE::FPIEInputInjector::Shutdown();
+	// The injector itself belongs to PIE_StudioRuntime and shuts down with it; only the editor's resolver is withdrawn.
+	UEMCPPIE::FPIEInputInjector::SetPlayerResolver(nullptr);
+	UEMCPPIE::PIERemotePlayers::Shutdown();
+	UEMCPPIE::FPIEUatRunner::Get().Shutdown();
 }
