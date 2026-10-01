@@ -47,7 +47,7 @@ private:
 		FString Path;
 		int32 Width = 0;
 		int32 Height = 0;
-		bool bSwapRB = false;
+		EPixelFormat Format = PF_B8G8R8A8;
 		bool bJpeg = true;
 		int32 Quality = 80;
 		FOnCaptureWritten OnWritten;
