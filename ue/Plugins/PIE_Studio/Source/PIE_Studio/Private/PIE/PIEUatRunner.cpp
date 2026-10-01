@@ -10,6 +10,8 @@
 #include "FileHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformFileManager.h"
 #include "InputAction.h"
@@ -23,6 +25,13 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "Settings/LevelEditorPlaySettings.h"
+#include "Algo/AllOf.h"
+
+#if UE_ENABLE_ICU
+THIRD_PARTY_INCLUDES_START
+#include <unicode/regex.h>
+THIRD_PARTY_INCLUDES_END
+#endif
 
 namespace UEMCPPIE
 {
@@ -36,8 +45,14 @@ namespace UEMCPPIE
 		public:
 			virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override
 			{
+				// Same shape as a log file line, so one pattern reads host and client logs alike.
+				const ELogVerbosity::Type Level = static_cast<ELogVerbosity::Type>(Verbosity & ELogVerbosity::VerbosityMask);
+				FString Line;
+				if (Category != NAME_None) Line = Category.ToString() + TEXT(": ");
+				if (Level != ELogVerbosity::Log) Line += FString(ToString(Level)) + TEXT(": ");
+				Line += V;
 				FScopeLock Lock(&Mutex);
-				Lines.Add(FString::Printf(TEXT("%s: %s"), *Category.ToString(), V));
+				Lines.Add(MoveTemp(Line));
 			}
 			virtual bool CanBeUsedOnAnyThread() const override { return true; }
 			virtual bool CanBeUsedOnMultipleThreads() const override { return true; }
@@ -60,7 +75,7 @@ namespace UEMCPPIE
 		{
 			FString Path;
 			int64 Offset = 0;
-			FString Partial;
+			TArray<uint8> Partial;
 			TArray<FString> Lines;
 
 			void Begin()
@@ -99,53 +114,62 @@ namespace UEMCPPIE
 					return;
 				}
 				Offset = Size;
-				FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num());
-				Partial.Append(Converted.Get(), Converted.Length());
-				int32 Newline;
-				while (Partial.FindChar(TEXT('\n'), Newline))
+				// Decode whole lines only: a read can end inside a multi-byte character.
+				Partial.Append(Bytes);
+				int32 Start = 0;
+				for (int32 i = 0; i < Partial.Num(); ++i)
 				{
-					FString Line = Partial.Left(Newline);
+					if (Partial[i] != '\n') continue;
+					FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(Partial.GetData() + Start), i - Start);
+					FString Line(Converted.Length(), Converted.Get());
 					Line.TrimEndInline();
 					Lines.Add(MoveTemp(Line));
-					Partial.RightChopInline(Newline + 1);
+					Start = i + 1;
 				}
+				Partial.RemoveAt(0, Start, EAllowShrinking::No);
 			}
 		};
 
 		// ── Scenario model ──────────────────────────────────────────────────
 
-		struct FAction
+		struct FUatAction
 		{
-			enum class EKind { Tape, Hold, Inject, Console, Wait } Kind = EKind::Wait;
+			enum class EKind { Tape, Hold, Inject, Console, Wait, Place } Kind = EKind::Wait;
 			int32 Client = 0;
 			FString ActionPath;
 			TArray<FVector> Values;
 			FVector Value = FVector(1, 0, 0);
 			float Ms = 0.0f;
 			FString Command;
+			// Place: next to actor `At` (offset in its local frame, facing it), or at `Value` with `Yaw`.
+			FString At;
+			FVector Offset = FVector(300, 0, 0);
+			bool bFace = true;
+			TOptional<double> Yaw;
 		};
 
-		struct FRule
+		struct FUatRule
 		{
 			FString Log;      // "host" or "client:N"
+			int32 Client = 0; // 0 = the host log
 			FString Pattern;
 			int32 Min = 1;
 			int32 Max = -1;
 		};
 
-		struct FStep
+		struct FUatStep
 		{
 			FString Name;
-			TArray<FAction> Do;
-			TArray<FRule> Expect;
-			TArray<FRule> Forbid;
+			TArray<FUatAction> Do;
+			TArray<FUatRule> Expect;
+			TArray<FUatRule> Forbid;
 			float WindowMs = 4000.0f;
 		};
 
-		struct FStepResult
+		struct FUatStepResult
 		{
 			FString Name;
-			FString Verdict; // PASS | FAIL | TIMEOUT | SKIPPED
+			FString Verdict; // PASS | FAIL | SKIPPED
 			TArray<FString> Details;
 		};
 
@@ -174,7 +198,25 @@ namespace UEMCPPIE
 			return Out;
 		}
 
-		bool ParseRule(const TSharedPtr<FJsonObject>& O, FRule& Out, FString& Err)
+		/** FRegexPattern swallows a bad pattern and then matches nothing, so compile it with ICU first. */
+		bool ValidateRegex(const FString& Pattern, FString& Err)
+		{
+#if UE_ENABLE_ICU
+			UErrorCode Status = U_ZERO_ERROR;
+			UParseError Parse;
+			const FTCHARToUTF8 Utf8(*Pattern);
+			const icu::UnicodeString Source = icu::UnicodeString::fromUTF8(icu::StringPiece(Utf8.Get(), Utf8.Length()));
+			TUniquePtr<icu::RegexPattern> Compiled(icu::RegexPattern::compile(Source, 0, Parse, Status));
+			if (U_FAILURE(Status))
+			{
+				Err = FString::Printf(TEXT("pattern /%s/ is not a valid regex: %s at offset %d"), *Pattern, UTF8_TO_TCHAR(u_errorName(Status)), Parse.offset);
+				return false;
+			}
+#endif
+			return true;
+		}
+
+		bool ParseRule(const TSharedPtr<FJsonObject>& O, FUatRule& Out, FString& Err)
 		{
 			if (!O->TryGetStringField(TEXT("pattern"), Out.Pattern) || Out.Pattern.IsEmpty())
 			{
@@ -182,9 +224,16 @@ namespace UEMCPPIE
 				return false;
 			}
 			Out.Log = O->HasField(TEXT("log")) ? O->GetStringField(TEXT("log")) : TEXT("host");
-			if (Out.Log != TEXT("host") && !Out.Log.StartsWith(TEXT("client:")))
+			const FString Index = Out.Log.StartsWith(TEXT("client:")) ? Out.Log.RightChop(7) : FString();
+			const bool bDigits = !Index.IsEmpty() && Index.Len() < 4 && Algo::AllOf(Index, [](TCHAR C) { return FChar::IsDigit(C); });
+			if (Out.Log != TEXT("host") && !bDigits)
 			{
 				Err = FString::Printf(TEXT("log must be \"host\" or \"client:N\", not \"%s\""), *Out.Log);
+				return false;
+			}
+			Out.Client = bDigits ? FCString::Atoi(*Index) : 0;
+			if (!ValidateRegex(Out.Pattern, Err))
+			{
 				return false;
 			}
 			double N = 0;
@@ -193,21 +242,21 @@ namespace UEMCPPIE
 			return true;
 		}
 
-		bool ParseAction(const TSharedPtr<FJsonObject>& O, FAction& Out, FString& Err)
+		bool ParseAction(const TSharedPtr<FJsonObject>& O, FUatAction& Out, FString& Err)
 		{
 			double N = 0;
 			if (O->TryGetNumberField(TEXT("client"), N)) Out.Client = static_cast<int32>(N);
 
 			if (O->TryGetNumberField(TEXT("wait_ms"), N))
 			{
-				Out.Kind = FAction::EKind::Wait;
+				Out.Kind = FUatAction::EKind::Wait;
 				Out.Ms = static_cast<float>(N);
 				return true;
 			}
 			FString Cmd;
 			if (O->TryGetStringField(TEXT("console"), Cmd))
 			{
-				Out.Kind = FAction::EKind::Console;
+				Out.Kind = FUatAction::EKind::Console;
 				Out.Command = Cmd;
 				return true;
 			}
@@ -225,7 +274,7 @@ namespace UEMCPPIE
 
 			if (O->TryGetObjectField(TEXT("tape"), Body))
 			{
-				Out.Kind = FAction::EKind::Tape;
+				Out.Kind = FUatAction::EKind::Tape;
 				if (!ActionOf(*Body)) return false;
 				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
 				if (!(*Body)->TryGetArrayField(TEXT("values"), Values) || Values->Num() == 0)
@@ -238,7 +287,7 @@ namespace UEMCPPIE
 			}
 			if (O->TryGetObjectField(TEXT("press"), Body))
 			{
-				Out.Kind = FAction::EKind::Tape;
+				Out.Kind = FUatAction::EKind::Tape;
 				if (!ActionOf(*Body)) return false;
 				double Frames = 4;
 				(*Body)->TryGetNumberField(TEXT("frames"), Frames);
@@ -248,7 +297,7 @@ namespace UEMCPPIE
 			}
 			if (O->TryGetObjectField(TEXT("hold"), Body))
 			{
-				Out.Kind = FAction::EKind::Hold;
+				Out.Kind = FUatAction::EKind::Hold;
 				if (!ActionOf(*Body)) return false;
 				Out.Value = ParseVector((*Body)->TryGetField(TEXT("value")));
 				double Ms = 0;
@@ -262,12 +311,32 @@ namespace UEMCPPIE
 			}
 			if (O->TryGetObjectField(TEXT("inject"), Body))
 			{
-				Out.Kind = FAction::EKind::Inject;
+				Out.Kind = FUatAction::EKind::Inject;
 				if (!ActionOf(*Body)) return false;
 				Out.Value = ParseVector((*Body)->TryGetField(TEXT("value")));
 				return true;
 			}
-			Err = TEXT("an action must be one of tape, press, hold, inject, console, wait_ms");
+			if (O->TryGetObjectField(TEXT("place"), Body))
+			{
+				Out.Kind = FUatAction::EKind::Place;
+				const TSharedPtr<FJsonObject>& P = *Body;
+				double Yaw = 0;
+				if (P->TryGetNumberField(TEXT("yaw"), Yaw)) Out.Yaw = Yaw;
+				P->TryGetBoolField(TEXT("face"), Out.bFace);
+				if (P->TryGetStringField(TEXT("at"), Out.At) && !Out.At.IsEmpty())
+				{
+					if (P->HasField(TEXT("offset"))) Out.Offset = ParseVector(P->TryGetField(TEXT("offset")));
+					return true;
+				}
+				if (P->HasField(TEXT("location")))
+				{
+					Out.Value = ParseVector(P->TryGetField(TEXT("location")));
+					return true;
+				}
+				Err = TEXT("place needs at (an actor name or label) or location");
+				return false;
+			}
+			Err = TEXT("an action must be one of tape, press, hold, inject, console, place, wait_ms");
 			return false;
 		}
 	}
@@ -285,8 +354,8 @@ namespace UEMCPPIE
 		bool bOneProcess = false;
 		float JoinTimeoutS = 180.0f;
 		float SettleMs = 2000.0f;
-		TArray<FStep> Steps;
-		TArray<FStepResult> Results;
+		TArray<FUatStep> Steps;
+		TArray<FUatStepResult> Results;
 		FString Error;
 		FString ReportDir;
 		bool bAborted = false;
@@ -298,8 +367,11 @@ namespace UEMCPPIE
 		double WaitUntil = 0.0;
 		int32 HostMark = 0;
 		TMap<int32, int32> ClientMarks;
-		struct FPendingStop { double At; int32 Client; FString Id; };
-		TArray<FPendingStop> PendingStops;
+		struct FUatPendingStop { double At; int32 Client; FString Id; };
+		TArray<FUatPendingStop> PendingStops;
+		// Requests relayed to remote players in the current step; each must be confirmed applied.
+		struct FUatRelayed { FString Id; int32 Client; FString What; };
+		TArray<FUatRelayed> Relayed;
 
 		// Evidence.
 		FHostLogCapture HostLog;
@@ -368,19 +440,26 @@ namespace UEMCPPIE
 			return true;
 		}
 
-		void BeginClientLogs()
+		// Each client names its own log file when it joins; join order and launch order differ.
+		bool BeginClientLogs(FString& OutError)
 		{
 			ClientLogs.Reset();
 			if (bOneProcess)
 			{
-				return;
+				return true;
 			}
-			for (int32 Client = 1; Client <= RemoteCount(); ++Client)
+			for (const PIERemotePlayers::FRemotePlayer& P : PIERemotePlayers::List())
 			{
-				FClientLogTail& Tail = ClientLogs.Add(Client);
-				Tail.Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectLogDir() / FString::Printf(TEXT("%s_%d.log"), FApp::GetProjectName(), Client + 1));
+				if (P.LogFile.IsEmpty())
+				{
+					OutError = FString::Printf(TEXT("client %d (%s) reported no log file"), P.Client, *P.PlayerName);
+					return false;
+				}
+				FClientLogTail& Tail = ClientLogs.Add(P.Client);
+				Tail.Path = P.LogFile;
 				Tail.Begin();
 			}
+			return true;
 		}
 
 		void PollClientLogs()
@@ -392,16 +471,15 @@ namespace UEMCPPIE
 		}
 
 		// Lines in a log since the current step began.
-		void LinesSinceMark(const FString& Log, TArray<FString>& Out) const
+		void LinesSinceMark(const FUatRule& Rule, TArray<FString>& Out) const
 		{
-			if (Log == TEXT("host") || bOneProcess)
+			if (Rule.Client == 0 || bOneProcess)
 			{
 				HostLog.CopyFrom(HostMark, Out);
 				return;
 			}
-			const int32 Client = FCString::Atoi(*Log.RightChop(7));
-			const FClientLogTail* Tail = ClientLogs.Find(Client);
-			const int32* Mark = ClientMarks.Find(Client);
+			const FClientLogTail* Tail = ClientLogs.Find(Rule.Client);
+			const int32* Mark = ClientMarks.Find(Rule.Client);
 			if (Tail && Mark)
 			{
 				for (int32 i = *Mark; i < Tail->Lines.Num(); ++i) { Out.Add(Tail->Lines[i]); }
@@ -424,12 +502,12 @@ namespace UEMCPPIE
 			return Count;
 		}
 
-		bool ExpectationsMet(const FStep& Step) const
+		bool ExpectationsMet(const FUatStep& Step) const
 		{
-			for (const FRule& Rule : Step.Expect)
+			for (const FUatRule& Rule : Step.Expect)
 			{
 				TArray<FString> Lines;
-				LinesSinceMark(Rule.Log, Lines);
+				LinesSinceMark(Rule, Lines);
 				const int32 Count = CountMatches(Lines, Rule.Pattern, nullptr);
 				if (Count < Rule.Min || (Rule.Max >= 0 && Count > Rule.Max))
 				{
@@ -439,15 +517,15 @@ namespace UEMCPPIE
 			return true;
 		}
 
-		FStepResult Evaluate(const FStep& Step) const
+		FUatStepResult Evaluate(const FUatStep& Step) const
 		{
-			FStepResult R;
+			FUatStepResult R;
 			R.Name = Step.Name;
 			bool bPass = true;
-			for (const FRule& Rule : Step.Expect)
+			for (const FUatRule& Rule : Step.Expect)
 			{
 				TArray<FString> Lines;
-				LinesSinceMark(Rule.Log, Lines);
+				LinesSinceMark(Rule, Lines);
 				TArray<FString> Samples;
 				const int32 Count = CountMatches(Lines, Rule.Pattern, &Samples);
 				const bool bOk = Count >= Rule.Min && (Rule.Max < 0 || Count <= Rule.Max);
@@ -457,10 +535,10 @@ namespace UEMCPPIE
 					Rule.Max >= 0 ? *FString::Printf(TEXT("[%d..%d]"), Rule.Min, Rule.Max) : *FString::Printf(TEXT("[>=%d]"), Rule.Min),
 					Count, Samples.Num() ? *FString::Printf(TEXT(" e.g. %s"), *Samples[0].Left(200)) : TEXT("")));
 			}
-			for (const FRule& Rule : Step.Forbid)
+			for (const FUatRule& Rule : Step.Forbid)
 			{
 				TArray<FString> Lines;
-				LinesSinceMark(Rule.Log, Lines);
+				LinesSinceMark(Rule, Lines);
 				TArray<FString> Samples;
 				const int32 Count = CountMatches(Lines, Rule.Pattern, &Samples);
 				bPass &= Count == 0;
@@ -468,14 +546,131 @@ namespace UEMCPPIE
 					Count == 0 ? TEXT("ok  ") : TEXT("HIT "), *Rule.Log, *Rule.Pattern, Count,
 					Samples.Num() ? *FString::Printf(TEXT(" e.g. %s"), *Samples[0].Left(200)) : TEXT("")));
 			}
+			for (const FUatRelayed& Req : Relayed)
+			{
+				const UPIEStudioRemoteControl* Remote = PIERemotePlayers::FindById(Req.Id);
+				const FPIEStudioRemoteResult* Result = Remote ? Remote->FindResult(Req.Id) : nullptr;
+				if (!Result)
+				{
+					bPass = false;
+					R.Details.Add(FString::Printf(TEXT("MISS client %d never confirmed %s"), Req.Client, *Req.What));
+				}
+				else if (!Result->bOk)
+				{
+					bPass = false;
+					R.Details.Add(FString::Printf(TEXT("FAIL client %d could not run %s: %s"), Req.Client, *Req.What, *Result->Error));
+				}
+			}
 			R.Verdict = bPass ? TEXT("PASS") : TEXT("FAIL");
 			return R;
 		}
 
-		bool RunAction(const FAction& A, FString& Err)
+		// Every relayed request has been answered.
+		bool RelayedSettled() const
+		{
+			for (const FUatRelayed& Req : Relayed)
+			{
+				const UPIEStudioRemoteControl* Remote = PIERemotePlayers::FindById(Req.Id);
+				if (!Remote || !Remote->FindResult(Req.Id)) return false;
+			}
+			return true;
+		}
+
+		// A step may end before its window only when nothing later in the window could change the verdict.
+		bool CanFinishEarly(const FUatStep& Step) const
+		{
+			if (Step.Forbid.Num() > 0 || Step.Expect.Num() == 0)
+			{
+				return false;
+			}
+			for (const FUatRule& Rule : Step.Expect)
+			{
+				if (Rule.Max >= 0) return false;
+			}
+			return ExpectationsMet(Step) && RelayedSettled();
+		}
+
+		static FInputActionValue ToValue(const UInputAction* Input, const FVector& Value)
+		{
+			switch (Input->ValueType)
+			{
+			case EInputActionValueType::Boolean: return FInputActionValue(Value.X != 0.0);
+			case EInputActionValueType::Axis1D:  return FInputActionValue(static_cast<float>(Value.X));
+			case EInputActionValueType::Axis2D:  return FInputActionValue(FVector2D(Value.X, Value.Y));
+			default:                             return FInputActionValue(Value);
+			}
+		}
+
+		/** Teleports a player's pawn on the server; the owning client follows through movement correction. */
+		bool Place(const FUatAction& A, FString& Err)
+		{
+			UWorld* World = PIERemotePlayers::FindServerWorld();
+			if (!World) World = GEditor->PlayWorld;
+			if (!World)
+			{
+				Err = TEXT("place: no PIE world");
+				return false;
+			}
+			APlayerController* PC = nullptr;
+			if (A.Client > 0)
+			{
+				UPIEStudioRemoteControl* Remote = PIERemotePlayers::Find(A.Client, Err);
+				PC = Remote ? Cast<APlayerController>(Remote->GetOwner()) : nullptr;
+			}
+			else
+			{
+				PC = World->GetFirstPlayerController();
+				PC = PC && PC->IsLocalController() ? PC : nullptr;
+			}
+			APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+			if (!Pawn)
+			{
+				Err = FString::Printf(TEXT("place: client %d has no pawn%s"), A.Client, Err.IsEmpty() ? TEXT("") : *(TEXT(" (") + Err + TEXT(")")));
+				return false;
+			}
+
+			FVector Location = A.Value;
+			FRotator Rotation(0, A.Yaw.Get(Pawn->GetActorRotation().Yaw), 0);
+			if (!A.At.IsEmpty())
+			{
+				AActor* Target = nullptr;
+				for (TActorIterator<AActor> It(World); It && !Target; ++It)
+				{
+					if (It->GetName() == A.At || It->GetActorLabel() == A.At)
+					{
+						Target = *It;
+					}
+				}
+				if (!Target)
+				{
+					Err = FString::Printf(TEXT("place: no actor named or labelled %s in %s"), *A.At, *World->GetName());
+					return false;
+				}
+				Location = Target->GetActorTransform().TransformPosition(A.Offset);
+				if (A.bFace && !A.Yaw.IsSet())
+				{
+					Rotation.Yaw = (Target->GetActorLocation() - Location).Rotation().Yaw;
+				}
+			}
+
+			if (!Pawn->TeleportTo(Location, Rotation))
+			{
+				Err = FString::Printf(TEXT("place: %s does not fit at %s"), *Pawn->GetName(), *Location.ToCompactString());
+				return false;
+			}
+			PC->SetControlRotation(Rotation);
+			if (!PC->IsLocalController())
+			{
+				PC->ClientSetRotation(Rotation);
+			}
+			UE_LOG(LogPIEStudio, Log, TEXT("[UAT] placed %s at %s yaw %.0f"), *Pawn->GetName(), *Location.ToCompactString(), Rotation.Yaw);
+			return true;
+		}
+
+		bool RunAction(const FUatAction& A, FString& Err)
 		{
 			UInputAction* Input = nullptr;
-			if (A.Kind == FAction::EKind::Tape || A.Kind == FAction::EKind::Hold || A.Kind == FAction::EKind::Inject)
+			if (A.Kind == FUatAction::EKind::Tape || A.Kind == FUatAction::EKind::Hold || A.Kind == FUatAction::EKind::Inject)
 			{
 				Input = Cast<UInputAction>(FSoftObjectPath(A.ActionPath).TryLoad());
 				if (!Input)
@@ -483,6 +678,11 @@ namespace UEMCPPIE
 					Err = FString::Printf(TEXT("InputAction %s not found"), *A.ActionPath);
 					return false;
 				}
+			}
+
+			if (A.Kind == FUatAction::EKind::Place)
+			{
+				return Place(A, Err);
 			}
 
 			if (A.Client > 0)
@@ -494,46 +694,51 @@ namespace UEMCPPIE
 				}
 				const FString Id = PIERemotePlayers::NewId(TEXT("uat"));
 				PIERemotePlayers::RememberId(Id, Remote);
+				FString What;
 				switch (A.Kind)
 				{
-				case FAction::EKind::Tape:    Remote->SendTape(Id, FSoftObjectPath(Input), A.Values); break;
-				case FAction::EKind::Inject:  Remote->SendInject(Id, FSoftObjectPath(Input), A.Value); break;
-				case FAction::EKind::Console: Remote->SendConsole(Id, A.Command); break;
-				case FAction::EKind::Hold:
+				case FUatAction::EKind::Tape:
+					Remote->SendTape(Id, FSoftObjectPath(Input), A.Values);
+					What = FString::Printf(TEXT("a tape on %s"), *Input->GetName());
+					break;
+				case FUatAction::EKind::Inject:
+					Remote->SendInject(Id, FSoftObjectPath(Input), A.Value);
+					What = FString::Printf(TEXT("an inject on %s"), *Input->GetName());
+					break;
+				case FUatAction::EKind::Console:
+					Remote->SendConsole(Id, A.Command);
+					What = FString::Printf(TEXT("console '%s'"), *A.Command);
+					break;
+				case FUatAction::EKind::Hold:
 					Remote->SendStartHold(Id, FSoftObjectPath(Input), A.Value);
 					PendingStops.Add({ Now() + A.Ms / 1000.0, A.Client, Id });
+					What = FString::Printf(TEXT("a hold on %s"), *Input->GetName());
 					break;
 				default: break;
 				}
+				Relayed.Add({ Id, A.Client, What });
 				return true;
 			}
 
 			// The editor's own player.
 			switch (A.Kind)
 			{
-			case FAction::EKind::Tape:
+			case FUatAction::EKind::Tape:
 				return !FPIEInputInjector::StartTape(Input, A.Values, 60, FString(), Err).IsEmpty();
-			case FAction::EKind::Inject:
+			case FUatAction::EKind::Inject:
+				return FPIEInputInjector::InjectOnce(Input, ToValue(Input, A.Value), Err);
+			case FUatAction::EKind::Hold:
 			{
-				FInputActionValue V;
-				switch (Input->ValueType)
+				// Timed by the wall clock, like a remote hold; a tape would stretch with the frame rate.
+				const FString Id = FPIEInputInjector::StartHold(Input, ToValue(Input, A.Value), FString(), Err);
+				if (Id.IsEmpty())
 				{
-				case EInputActionValueType::Boolean: V = FInputActionValue(A.Value.X != 0.0); break;
-				case EInputActionValueType::Axis1D:  V = FInputActionValue(static_cast<float>(A.Value.X)); break;
-				case EInputActionValueType::Axis2D:  V = FInputActionValue(FVector2D(A.Value.X, A.Value.Y)); break;
-				default:                             V = FInputActionValue(A.Value); break;
+					return false;
 				}
-				return FPIEInputInjector::InjectOnce(Input, V, Err);
+				PendingStops.Add({ Now() + A.Ms / 1000.0, 0, Id });
+				return true;
 			}
-			case FAction::EKind::Hold:
-			{
-				TArray<FVector> Frames;
-				const int32 Count = FMath::Max(1, FMath::RoundToInt(A.Ms / 1000.0f * 60.0f));
-				Frames.Init(A.Value, Count);
-				Frames.Add(FVector::ZeroVector);
-				return !FPIEInputInjector::StartTape(Input, Frames, 60, FString(), Err).IsEmpty();
-			}
-			case FAction::EKind::Console:
+			case FUatAction::EKind::Console:
 			{
 				UWorld* World = PIERemotePlayers::FindServerWorld();
 				if (!World) World = GEditor->PlayWorld;
@@ -556,6 +761,7 @@ namespace UEMCPPIE
 		void MarkStepStart()
 		{
 			HostMark = HostLog.Num();
+			Relayed.Reset();
 			ClientMarks.Reset();
 			for (const TPair<int32, FClientLogTail>& Pair : ClientLogs)
 			{
@@ -571,6 +777,10 @@ namespace UEMCPPIE
 			}
 			State = EState::Stopping;
 			PhaseStart = Now();
+			if (GEditor && GEditor->IsPlaySessionRequestQueued())
+			{
+				GEditor->CancelRequestPlaySession();
+			}
 			if (GEditor && GEditor->PlayWorld)
 			{
 				GEditor->RequestEndPlayMap();
@@ -596,7 +806,7 @@ namespace UEMCPPIE
 			{
 				return TEXT("ERROR");
 			}
-			for (const FStepResult& R : Results)
+			for (const FUatStepResult& R : Results)
 			{
 				if (R.Verdict != TEXT("PASS")) return TEXT("FAIL");
 			}
@@ -676,7 +886,11 @@ namespace UEMCPPIE
 			{
 				if (T >= PendingStops[i].At)
 				{
-					if (UPIEStudioRemoteControl* Remote = PIERemotePlayers::FindById(PendingStops[i].Id))
+					if (PendingStops[i].Client == 0)
+					{
+						FPIEInputInjector::StopHold(PendingStops[i].Id);
+					}
+					else if (UPIEStudioRemoteControl* Remote = PIERemotePlayers::FindById(PendingStops[i].Id))
 					{
 						Remote->SendStop(PendingStops[i].Id);
 					}
@@ -705,7 +919,12 @@ namespace UEMCPPIE
 				}
 				else if (AllJoined())
 				{
-					BeginClientLogs();
+					FString Err;
+					if (!BeginClientLogs(Err))
+					{
+						Fail(Err);
+						break;
+					}
 					State = EState::Settling;
 					PhaseStart = T;
 				}
@@ -738,11 +957,11 @@ namespace UEMCPPIE
 				{
 					break;
 				}
-				const FStep& Step = Steps[StepIndex];
+				const FUatStep& Step = Steps[StepIndex];
 				while (ActionIndex < Step.Do.Num())
 				{
-					const FAction& A = Step.Do[ActionIndex++];
-					if (A.Kind == FAction::EKind::Wait)
+					const FUatAction& A = Step.Do[ActionIndex++];
+					if (A.Kind == FUatAction::EKind::Wait)
 					{
 						WaitUntil = T + A.Ms / 1000.0;
 						return true;
@@ -767,15 +986,11 @@ namespace UEMCPPIE
 					Fail(TEXT("PIE ended during the run"));
 					break;
 				}
-				const FStep& Step = Steps[StepIndex];
+				const FUatStep& Step = Steps[StepIndex];
 				const bool bWindowOver = T - PhaseStart >= Step.WindowMs / 1000.0;
-				if (bWindowOver || (Step.Forbid.Num() == 0 && Step.Expect.Num() > 0 && ExpectationsMet(Step)))
+				if (bWindowOver || CanFinishEarly(Step))
 				{
-					FStepResult R = Evaluate(Step);
-					if (R.Verdict != TEXT("PASS") && bWindowOver && !ExpectationsMet(Step))
-					{
-						R.Verdict = TEXT("FAIL");
-					}
+					FUatStepResult R = Evaluate(Step);
 					UE_LOG(LogPIEStudio, Log, TEXT("[UAT] %s step %d %s: %s"), *Name, StepIndex + 1, *Step.Name, *R.Verdict);
 					Results.Add(MoveTemp(R));
 					AdvanceStep(T);
@@ -831,6 +1046,10 @@ namespace UEMCPPIE
 
 	void FPIEUatRunner::Shutdown()
 	{
+		if (IsRunning())
+		{
+			Impl->RestoreSettings();
+		}
 		if (Impl->TickHandle.IsValid())
 		{
 			FTSTicker::GetCoreTicker().RemoveTicker(Impl->TickHandle);
@@ -903,9 +1122,24 @@ namespace UEMCPPIE
 			double N = 0;
 			if ((*Pie)->TryGetNumberField(TEXT("players"), N)) Fresh.Players = FMath::Clamp(static_cast<int32>(N), 1, 16);
 			FString Mode;
-			if ((*Pie)->TryGetStringField(TEXT("net_mode"), Mode)) Fresh.bListen = Mode != TEXT("dedicated");
-			bool b = false;
-			if ((*Pie)->TryGetBoolField(TEXT("one_process"), b)) Fresh.bOneProcess = b;
+			if ((*Pie)->TryGetStringField(TEXT("net_mode"), Mode))
+			{
+				if (Mode != TEXT("listen") && Mode != TEXT("dedicated"))
+				{
+					OutError = FString::Printf(TEXT("pie.net_mode must be \"listen\" or \"dedicated\", not \"%s\""), *Mode);
+					return false;
+				}
+				Fresh.bListen = Mode == TEXT("listen");
+			}
+			// A dedicated server only stays inside the editor, where the run can read it, in one-process PIE.
+			bool b = !Fresh.bListen;
+			const bool bOneProcessGiven = (*Pie)->TryGetBoolField(TEXT("one_process"), b);
+			Fresh.bOneProcess = b;
+			if (!Fresh.bListen && bOneProcessGiven && !b)
+			{
+				OutError = TEXT("net_mode \"dedicated\" needs one_process true: a separate-process dedicated server runs outside the editor, where the run cannot drive or read it");
+				return false;
+			}
 		}
 		double N = 0;
 		if (Scenario->TryGetNumberField(TEXT("join_timeout_s"), N)) Fresh.JoinTimeoutS = static_cast<float>(N);
@@ -925,7 +1159,7 @@ namespace UEMCPPIE
 				OutError = FString::Printf(TEXT("step %d is not an object"), i + 1);
 				return false;
 			}
-			FStep Step;
+			FUatStep Step;
 			Step.Name = SO->HasField(TEXT("name")) ? SO->GetStringField(TEXT("name")) : FString::Printf(TEXT("step %d"), i + 1);
 			if (SO->TryGetNumberField(TEXT("window_ms"), N)) Step.WindowMs = static_cast<float>(N);
 			FString Err;
@@ -934,13 +1168,13 @@ namespace UEMCPPIE
 			{
 				for (const TSharedPtr<FJsonValue>& V : *Arr)
 				{
-					FAction A;
+					FUatAction A;
 					if (!V->AsObject().IsValid() || !ParseAction(V->AsObject(), A, Err))
 					{
 						OutError = FString::Printf(TEXT("step %d (%s): %s"), i + 1, *Step.Name, *Err);
 						return false;
 					}
-					if (A.Client >= Fresh.Players + (Fresh.bListen ? 0 : 1) || (A.Client == 0 && !Fresh.bListen && A.Kind != FAction::EKind::Wait))
+					if (A.Client < 0 || A.Client >= Fresh.Players + (Fresh.bListen ? 0 : 1) || (A.Client == 0 && !Fresh.bListen && A.Kind != FUatAction::EKind::Wait))
 					{
 						OutError = FString::Printf(TEXT("step %d (%s): client %d does not exist with %d players (%s)"), i + 1, *Step.Name, A.Client, Fresh.Players, Fresh.bListen ? TEXT("listen") : TEXT("dedicated"));
 						return false;
@@ -954,10 +1188,18 @@ namespace UEMCPPIE
 				{
 					for (const TSharedPtr<FJsonValue>& V : *Arr)
 					{
-						FRule R;
+						FUatRule R;
 						if (!V->AsObject().IsValid() || !ParseRule(V->AsObject(), R, Err))
 						{
 							OutError = FString::Printf(TEXT("step %d (%s): %s"), i + 1, *Step.Name, *Err);
+							return false;
+						}
+						// client:0 is the listen server's own player, whose lines are in the host log.
+						const bool bHostLog = R.Log == TEXT("host") || (R.Client == 0 && Fresh.bListen);
+						if (!bHostLog && (R.Client < 1 || R.Client > Fresh.RemoteCount()))
+						{
+							OutError = FString::Printf(TEXT("step %d (%s): log %s does not exist with %d players (%s)"), i + 1, *Step.Name, *R.Log,
+								Fresh.Players, Fresh.bListen ? TEXT("listen") : TEXT("dedicated"));
 							return false;
 						}
 						(FCString::Strcmp(Key, TEXT("expect")) == 0 ? Step.Expect : Step.Forbid).Add(MoveTemp(R));

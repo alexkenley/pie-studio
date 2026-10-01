@@ -2,6 +2,7 @@
 
 #include "PIE_StudioRuntimeModule.h"
 #include "PIEInputInjector.h"
+#include "HAL/PlatformOutputDevices.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
@@ -46,7 +47,7 @@ void UPIEStudioRemoteControl::BeginPlay()
 	if (GetOwnerRole() == ROLE_AutonomousProxy)
 	{
 		TapeFinishedHandle = UEMCPPIE::FPIEInputInjector::OnTapeFinished().AddUObject(this, &UPIEStudioRemoteControl::HandleTapeFinished);
-		ServerReady();
+		ServerReady(FPlatformOutputDevices::GetAbsoluteLogFilename());
 	}
 }
 
@@ -214,9 +215,10 @@ void UPIEStudioRemoteControl::HandleTapeFinished(const FString& Id)
 
 // ── Server-side answers ─────────────────────────────────────────────────────
 
-void UPIEStudioRemoteControl::ServerReady_Implementation()
+void UPIEStudioRemoteControl::ServerReady_Implementation(const FString& LogFile)
 {
 	bClientReady = true;
+	ClientLogFile = LogFile;
 	UE_LOG(LogPIEStudioRuntime, Log, TEXT("[PIEStudio] remote player %s is ready"), *GetNameSafe(GetOwner()));
 }
 

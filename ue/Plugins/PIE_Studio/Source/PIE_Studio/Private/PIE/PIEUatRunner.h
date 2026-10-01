@@ -12,13 +12,14 @@
  *     steps: [ { name,
  *                do: [ { client, tape: {action, values} } | { client, press: {action, frames?} }
  *                    | { client, hold: {action, value, ms} } | { client, inject: {action, value} }
- *                    | { client, console: "cmd" } | { wait_ms } ],
+ *                    | { client, console: "cmd" }
+ *                    | { client, place: {at, offset?, face?} | {location, yaw?} } | { wait_ms } ],
  *                expect: [ { log: "host"|"client:N", pattern, min?, max? } ],
  *                forbid: [ { log, pattern } ],
  *                window_ms } ] }
  *
  * Evidence: the editor process's log (every line, captured while the run is active) and, for separate-process
- * clients, each client's own log file (<Project>_<N+1>.log) read from where it stood when the step began. In
+ * clients, the log file each client reports when it joins, read from where it stood when the step began. In
  * one-process PIE every player logs to the editor, so `client:N` reads the host log.
  *
  * A step passes when every expectation matched its count and no forbidden pattern matched inside its window. It

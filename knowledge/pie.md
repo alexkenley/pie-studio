@@ -126,6 +126,6 @@ was applied. `client` 0 (or omitted) targets the host.
 
 To verify multiplayer behaviour without a human, write a scenario and call
 `uat_run` (see the README): it opens the map, starts PIE, drives each step and
-judges it from the host log and each client's `<Project>_<N+1>.log`. Poll
+judges it from the host log and the log file each client reports when it joins. Poll
 `uat_status`; read `report.md` from `report_dir`. Log-based checks need the
 game to log what it does; add the log line before writing the step.

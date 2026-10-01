@@ -23,6 +23,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::PieClients(const TSharedPtr<FJsonObjec
 		Entry->SetStringField(TEXT("player"), P.PlayerName);
 		Entry->SetStringField(TEXT("controller"), GetNameSafe(P.PlayerController));
 		Entry->SetBoolField(TEXT("ready"), P.bReady);
+		if (!P.LogFile.IsEmpty()) Entry->SetStringField(TEXT("log_file"), P.LogFile);
 		Players.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 

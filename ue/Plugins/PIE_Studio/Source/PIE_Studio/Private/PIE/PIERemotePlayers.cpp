@@ -107,6 +107,7 @@ namespace UEMCPPIE::PIERemotePlayers
 			Player.Control = Remote[i]->FindComponentByClass<UPIEStudioRemoteControl>();
 			Player.PlayerName = Remote[i]->PlayerState ? Remote[i]->PlayerState->GetPlayerName() : Remote[i]->GetName();
 			Player.bReady = Player.Control && Player.Control->IsClientReady();
+			Player.LogFile = Player.Control ? Player.Control->GetClientLogFile() : FString();
 		}
 		return Out;
 	}

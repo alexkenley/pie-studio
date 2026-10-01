@@ -46,6 +46,9 @@ public:
 	/** Server: true once the owning client has created its copy and can run requests. */
 	bool IsClientReady() const { return bClientReady; }
 
+	/** Server: the absolute path of the log file the owning client process writes. */
+	const FString& GetClientLogFile() const { return ClientLogFile; }
+
 	/** Server: the last result reported for a request id, if any. */
 	const FPIEStudioRemoteResult* FindResult(const FString& Id) const { return Results.Find(Id); }
 
@@ -84,7 +87,7 @@ private:
 	void ClientConsole(const FString& Id, const FString& Command);
 
 	UFUNCTION(Server, Reliable)
-	void ServerReady();
+	void ServerReady(const FString& LogFile);
 
 	UFUNCTION(Server, Reliable)
 	void ServerReport(const FString& Id, bool bOk, bool bFinished, const FString& Error);
@@ -96,6 +99,7 @@ private:
 
 	// Server state.
 	bool bClientReady = false;
+	FString ClientLogFile;
 	TMap<FString, FPIEStudioRemoteResult> Results;
 
 	// Client state: tapes this component started, so their completion is reported to the server.

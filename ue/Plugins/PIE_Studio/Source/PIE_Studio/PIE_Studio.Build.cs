@@ -39,5 +39,11 @@ public class PIE_Studio : ModuleRules
 				"WorkspaceMenuStructure",
 			}
 		);
+
+		// UAT scenarios validate their regex patterns with ICU, the engine's regex backend.
+		if (Target.bCompileICU)
+		{
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "ICU");
+		}
 	}
 }

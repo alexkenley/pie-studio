@@ -81,7 +81,7 @@ The runtime half lives in the `PIE_StudioRuntime` module (`DeveloperTool`), whic
 
 ## Multiplayer acceptance runs
 
-`uat_run` runs a scripted multiplayer acceptance test with no human at the keyboard. It opens the scenario's map, starts PIE with its players, waits for every remote player to join, then runs each step: drive input or console on any player, and judge the step from the logs. The evidence is the editor's own log plus each separate-process client's log file (`Saved/Logs/<Project>_<N+1>.log`). When the run ends it stops PIE, restores the play settings and writes `Saved/PIEStudio/UAT/<name>_<stamp>/report.md` and `report.json`. Poll `uat_status`; `uat_abort` ends a run early.
+`uat_run` runs a scripted multiplayer acceptance test with no human at the keyboard. It opens the scenario's map, starts PIE with its players, waits for every remote player to join, then runs each step: drive input or console on any player, and judge the step from the logs. The evidence is the editor's own log plus each separate-process client's own log file, whose path the client reports when it joins (`clients` shows it as `log_file`). `log: "client:0"` is the listen server's player, which logs to the host log. A dedicated server needs `one_process: true` (the default for `dedicated`): a separate-process server runs outside the editor, where the run cannot drive or read it. When the run ends it stops PIE, restores the play settings and writes `Saved/PIEStudio/UAT/<name>_<stamp>/report.md` and `report.json`. Poll `uat_status`; `uat_abort` ends a run early.
 
 ```json
 {
@@ -103,7 +103,7 @@ The runtime half lives in the `PIE_StudioRuntime` module (`DeveloperTool`), whic
 }
 ```
 
-Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"` (each with `client`), and `wait_ms`. `expect` rules take `min`/`max` match counts. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
+Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"`, `place {at, offset, face}` or `place {location, yaw}` (each with `client`), and `wait_ms`. `place` teleports that player's pawn on the server: next to the actor named or labelled `at` (`offset` in its local frame, default 300 units in front, facing it), or to an absolute `location`. `expect` rules take `min`/`max` match counts. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
 
 
 ## Frame Capture

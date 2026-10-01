@@ -21,6 +21,7 @@ namespace UEMCPPIE::PIERemotePlayers
 		APlayerController* PlayerController = nullptr;
 		UPIEStudioRemoteControl* Control = nullptr;
 		FString PlayerName;
+		FString LogFile;
 		bool bReady = false;
 	};
 
