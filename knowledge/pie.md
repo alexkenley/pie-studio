@@ -115,3 +115,17 @@ contact sheet. `test_list` enumerates them. This is the reproduce -> verify-a-fi
 `inject_input` / `inject_input_start` / `inject_input_tape` drive Enhanced Input
 actions programmatically. `capture` grabs viewport frames on demand (decoupled from
 replay) so inject/observe flows are visual too.
+
+## Remote players and acceptance runs
+
+Separate-process PIE clients (Run Under One Process off) are not reachable by
+`pie_instance`. Call `clients`; pass `client` (1..N) to `inject_input`,
+`inject_input_start`, `inject_input_tape` or `console` to drive that remote
+player through the game connection. `remote_result` confirms a relayed request
+was applied. `client` 0 (or omitted) targets the host.
+
+To verify multiplayer behaviour without a human, write a scenario and call
+`uat_run` (see the README): it opens the map, starts PIE, drives each step and
+judges it from the host log and each client's `<Project>_<N+1>.log`. Poll
+`uat_status`; read `report.md` from `report_dir`. Log-based checks need the
+game to log what it does; add the log line before writing the step.

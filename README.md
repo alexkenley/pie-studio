@@ -68,6 +68,43 @@ Unresolved recorder, replay, and observation targets are retried for up to 10
 seconds from `BeginPIE`; they then finalize as failures and retain `last_error`
 in their status responses, including after natural `EndPIE`.
 
+### Remote players
+
+With **Run Under One Process** off, every client is a separate `-game` process that the editor cannot reach directly. PIE Studio attaches a replicated control component to each remote player's controller on the server and relays commands over the game connection, so the same actions drive any player:
+
+- `clients` lists the session: net mode, the host player, and each remote player as `client` 1..N with a `ready` flag.
+- `inject_input`, `inject_input_start` and `inject_input_tape` take `client`; 1 or more relays to that remote player. `inject_input_update` and `inject_input_stop` route by the returned id.
+- `console` runs a command on the server (`client` 0) or on a remote player.
+- `remote_result` reports whether a relayed request was applied and, for tapes, finished.
+
+The runtime half lives in the `PIE_StudioRuntime` module (`DeveloperTool`), which loads in the client processes.
+
+## Multiplayer acceptance runs
+
+`uat_run` runs a scripted multiplayer acceptance test with no human at the keyboard. It opens the scenario's map, starts PIE with its players, waits for every remote player to join, then runs each step: drive input or console on any player, and judge the step from the logs. The evidence is the editor's own log plus each separate-process client's log file (`Saved/Logs/<Project>_<N+1>.log`). When the run ends it stops PIE, restores the play settings and writes `Saved/PIEStudio/UAT/<name>_<stamp>/report.md` and `report.json`. Poll `uat_status`; `uat_abort` ends a run early.
+
+```json
+{
+  "name": "coop-attack",
+  "map": "/Game/Maps/Test/L_CombatTest",
+  "pie": { "players": 2, "net_mode": "listen", "one_process": false },
+  "steps": [
+    {
+      "name": "P2 attacks",
+      "do": [ { "client": 1, "press": { "action": "/Game/Input/IA_Primary.IA_Primary" } } ],
+      "expect": [
+        { "log": "client:1", "pattern": "\\[Attack\\]" },
+        { "log": "host", "pattern": "plays Light01" }
+      ],
+      "forbid": [ { "log": "host", "pattern": "Error" } ],
+      "window_ms": 4000
+    }
+  ]
+}
+```
+
+Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"` (each with `client`), and `wait_ms`. `expect` rules take `min`/`max` match counts. A step passes when every expectation is met and no `forbid` pattern matched inside its window. It ends early once its expectations are met, unless it forbids something, in which case it watches the whole window.
+
 
 ## Frame Capture
 
@@ -96,7 +133,7 @@ pie(action="record_read", id="some-recording", file="drift")
 
 ## MCP Actions
 
-45 actions in the `pie` category (provisioned by the plugin; call as `pie(action="...")`):
+58 actions in the `pie` category (provisioned by the plugin; call as `pie(action="...")`):
 
 - **Recording** — `record_arm`, `record_disarm`, `record_stop`, `record_status`, `record_list`, `record_read`, `record_delete`, `mark`
 - **Replay** — `replay_arm`, `replay_run` (unattended), `replay_disarm`, `replay_stop`, `replay_status` with drift tracking and viewport capture
@@ -105,6 +142,8 @@ pie(action="record_read", id="some-recording", file="drift")
 - **Reproduction tests** — `test_scaffold`, `test_run`, `test_list`
 - **Observation** — `observe_arm`, `observe_disarm`, `observe_stop`, `observe_status`, `observe_list`, `observe_read` with profile-based sampling
 - **Input injection** — `inject_input`, `inject_input_start`, `inject_input_update`, `inject_input_stop`, `inject_input_tape`
+- **Remote players** — `clients`, `console`, `remote_result`
+- **Acceptance runs** — `uat_run`, `uat_status`, `uat_abort`
 - **Profiles** — `profile_create`, `profile_read`, `profile_update`, `profile_delete`, `profile_list`
 - **Diff / Snapshot** — `record_diff`, `snapshot`
 - **PIE inspection** — `anim_state`, `anim_properties`, `subsystem_state`
