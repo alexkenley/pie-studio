@@ -103,7 +103,7 @@ The runtime half lives in the `PIE_StudioRuntime` module (`DeveloperTool`), whic
 }
 ```
 
-Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"`, `place {at, offset, face}` or `place {location, yaw}` (each with `client`), and `wait_ms`. `place` teleports that player's pawn on the server: next to the actor named or labelled `at` (`offset` in its local frame, default 300 units in front, facing it), or to an absolute `location`. `capture` (a label, or `true`) saves that player's view as a JPEG under the report's `captures/` folder; the step fails if the image is not written, and `report.md` embeds every capture next to its step, so a vision pass can judge what the logs cannot show.
+Step actions: `tape {action, values}`, `press {action, frames}`, `hold {action, value, ms}`, `inject {action, value}`, `console "cmd"`, `place {at, offset, face}` or `place {location, yaw}` (each with `client`), and `wait_ms`. `place` teleports that player's pawn on the server and turns it on its own machine (a remote player owns its facing, so the step fails if that client never confirms the turn): next to the actor named or labelled `at` (`offset` in its local frame, default 300 units in front, facing it), or to an absolute `location`. `capture` (a label, or `true`) saves that player's view as a JPEG under the report's `captures/` folder; the step fails if the image is not written, and `report.md` embeds every capture next to its step, so a vision pass can judge what the logs cannot show.
 
 ### Windowless clients
 

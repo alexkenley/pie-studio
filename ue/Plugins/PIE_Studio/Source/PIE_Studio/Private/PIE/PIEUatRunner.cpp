@@ -706,9 +706,10 @@ namespace UEMCPPIE
 				return false;
 			}
 			APlayerController* PC = nullptr;
+			UPIEStudioRemoteControl* Remote = nullptr;
 			if (A.Client > 0)
 			{
-				UPIEStudioRemoteControl* Remote = PIERemotePlayers::Find(A.Client, Err);
+				Remote = PIERemotePlayers::Find(A.Client, Err);
 				PC = Remote ? Cast<APlayerController>(Remote->GetOwner()) : nullptr;
 			}
 			else
@@ -753,9 +754,13 @@ namespace UEMCPPIE
 				return false;
 			}
 			PC->SetControlRotation(Rotation);
-			if (!PC->IsLocalController())
+			if (Remote)
 			{
-				PC->ClientSetRotation(Rotation);
+				// The owning client keeps its own facing and moves from it; it has to turn itself.
+				const FString Id = PIERemotePlayers::NewId(TEXT("uat"));
+				PIERemotePlayers::RememberId(Id, Remote);
+				Remote->SendFace(Id, Rotation);
+				Relayed.Add({ Id, A.Client, FString::Printf(TEXT("turning to yaw %.0f"), Rotation.Yaw) });
 			}
 			UE_LOG(LogPIEStudio, Log, TEXT("[UAT] placed %s at %s yaw %.0f"), *Pawn->GetName(), *Location.ToCompactString(), Rotation.Yaw);
 			return true;

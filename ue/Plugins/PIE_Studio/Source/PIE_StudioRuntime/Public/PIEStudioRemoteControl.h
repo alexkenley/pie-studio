@@ -62,6 +62,8 @@ public:
 	void SendConsole(const FString& Id, const FString& Command);
 	/** The owning client saves its viewport to OutputPath (same machine; absolute) and reports when written. */
 	void SendCapture(const FString& Id, const FString& OutputPath);
+	/** The owning client turns its pawn and view to Rotation; a server teleport cannot, as the client owns its facing. */
+	void SendFace(const FString& Id, const FRotator& Rotation);
 
 	/** Most input values a single tape request may carry. */
 	static constexpr int32 MaxTapeFrames = 3600;
@@ -91,6 +93,9 @@ private:
 
 	UFUNCTION(Client, Reliable)
 	void ClientCapture(const FString& Id, const FString& OutputPath);
+
+	UFUNCTION(Client, Reliable)
+	void ClientFace(const FString& Id, FRotator Rotation);
 
 	UFUNCTION(Server, Reliable)
 	void ServerReady(const FString& LogFile);
