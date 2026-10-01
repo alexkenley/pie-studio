@@ -224,9 +224,10 @@ void UPIEStudioRemoteControl::ClientFace_Implementation(const FString& Id, FRota
 		Report(Id, false, true, TEXT("this player has no pawn to turn"));
 		return;
 	}
-	// The autonomous client owns its pawn's facing; a rotation set on the server is overwritten by the next move.
+	// The autonomous client owns its pawn's facing; a rotation set on the server is overwritten by the next move. A
+	// teleport in place rather than a bare rotation, so movement that holds its own facing hears about it.
 	PC->SetControlRotation(Rotation);
-	Pawn->SetActorRotation(FRotator(0.0, Rotation.Yaw, 0.0));
+	Pawn->TeleportTo(Pawn->GetActorLocation(), FRotator(0.0, Rotation.Yaw, 0.0), /*bIsATest*/ false, /*bNoCheck*/ true);
 	UE_LOG(LogPIEStudioRuntime, Log, TEXT("[PIEStudio] %s faces yaw %.0f"), *Pawn->GetName(), Rotation.Yaw);
 	Report(Id, true, true, FString());
 }
