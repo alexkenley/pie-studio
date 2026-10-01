@@ -4,6 +4,7 @@
 #include "Handlers/GameplayHandlers.h"
 #include "PIEInputInjector.h"
 #include "PIE/PIERemotePlayers.h"
+#include "PIE/PIEUatRunner.h"
 #include "PIE/PIEWorldResolver.h"
 #include "Engine/LocalPlayer.h"
 #include "PIE/PIEInputRecorder.h"
@@ -55,6 +56,11 @@ void FPIE_StudioModule::StartupModule()
 	UEMCP::RegisterExternalHandler(TEXT("clients"), &FGameplayHandlers::PieClients);
 	UEMCP::RegisterExternalHandler(TEXT("console"), &FGameplayHandlers::PieConsole);
 	UEMCP::RegisterExternalHandler(TEXT("remote_result"), &FGameplayHandlers::PieRemoteResult);
+
+	// Multiplayer acceptance runs
+	UEMCP::RegisterExternalHandler(TEXT("uat_run"), &FGameplayHandlers::PieUatRun);
+	UEMCP::RegisterExternalHandler(TEXT("uat_status"), &FGameplayHandlers::PieUatStatus);
+	UEMCP::RegisterExternalHandler(TEXT("uat_abort"), &FGameplayHandlers::PieUatAbort);
 
 	// Recording
 	UEMCP::RegisterExternalHandler(TEXT("record_arm"), &FGameplayHandlers::PieRecordArm);
@@ -144,7 +150,8 @@ void FPIE_StudioModule::StartupModule()
 			{
 				return UEMCPPIE::FPIEInputRecorder::Get().IsActive()
 				    || UEMCPPIE::FPIEInputReplayer::Get().IsActive()
-				    || UEMCPPIE::FPIEObserver::Get().IsActive();
+				    || UEMCPPIE::FPIEObserver::Get().IsActive()
+				    || UEMCPPIE::FPIEUatRunner::Get().IsRunning();
 			});
 			GEditor->ShouldDisableCPUThrottlingDelegates.Add(Suppress);
 			return false;
@@ -168,6 +175,9 @@ void FPIE_StudioModule::ShutdownModule()
 	UEMCP::UnregisterExternalHandler(TEXT("clients"));
 	UEMCP::UnregisterExternalHandler(TEXT("console"));
 	UEMCP::UnregisterExternalHandler(TEXT("remote_result"));
+	UEMCP::UnregisterExternalHandler(TEXT("uat_run"));
+	UEMCP::UnregisterExternalHandler(TEXT("uat_status"));
+	UEMCP::UnregisterExternalHandler(TEXT("uat_abort"));
 	UEMCP::UnregisterExternalHandler(TEXT("record_arm"));
 	UEMCP::UnregisterExternalHandler(TEXT("record_disarm"));
 	UEMCP::UnregisterExternalHandler(TEXT("record_stop"));
@@ -223,4 +233,5 @@ void FPIE_StudioModule::ShutdownModule()
 	// The injector itself belongs to PIE_StudioRuntime and shuts down with it; only the editor's resolver is withdrawn.
 	UEMCPPIE::FPIEInputInjector::SetPlayerResolver(nullptr);
 	UEMCPPIE::PIERemotePlayers::Shutdown();
+	UEMCPPIE::FPIEUatRunner::Get().Shutdown();
 }
