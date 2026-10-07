@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
   "Version": 1,
-  "VersionName": "0.0.1",
+  "VersionName": "0.6.3",
   "FriendlyName": "PIE Studio",
   "Description": "PIE record, replay, observe, and input injection for ue-mcp",
   "Category": "Editor",
